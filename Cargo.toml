@@ -1,0 +1,12 @@
+[package]
+name = "tiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam-deque = { version = "0.8.4" }
+gdal = { version = "0.17.1", features = ["bindgen"] }
+gdal-sys = "0.10.0"
+image = { version = "0.25.5", default-features = false, features = ["jpeg"] }
+jpeg-encoder = "0.6.0"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
