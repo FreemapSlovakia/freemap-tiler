@@ -8,7 +8,8 @@ use gdal::spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef};
 use gdal::{Dataset, DriverManager};
 use gdal_sys::{
     CPLErr, GDALCreateGenImgProjTransformer2, GDALCreateWarpOptions,
-    GDALDestroyGenImgProjTransformer, GDALDestroyWarpOptions, GDALReprojectImage, GDALResampleAlg,
+    GDALDestroyGenImgProjTransformer, GDALDestroyWarpOptions, GDALGenImgProjTransform,
+    GDALReprojectImage, GDALResampleAlg, GDALWarp, GDALWarpAppOptions,
 };
 use image::imageops::FilterType;
 use image::{ImageBuffer, RgbImage};
@@ -16,6 +17,7 @@ use jpeg_encoder::{ColorType, Encoder};
 use rusqlite::{Connection, Error};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
+use std::os::raw::c_void;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -134,6 +136,9 @@ fn main() {
 
     let target_wkt = CString::new(target_srs.to_wkt().expect("error producing WKT"))
         .expect("CString::new failed");
+
+    let source_wkt = CString::new("EPSG:8353").unwrap();
+    let target_wkt = CString::new("EPSG:3857").unwrap();
 
     let bbox = compute_bbox(&source_ds);
 
@@ -275,7 +280,7 @@ fn main() {
                 ])
                 .expect("error setting geo transform");
 
-            let warp_result = unsafe {
+            unsafe {
                 let warp_options = GDALCreateWarpOptions();
 
                 let option1 = CString::new(format!("COORDINATE_OPERATION={pipeline}")).unwrap();
@@ -288,9 +293,19 @@ fn main() {
                     options.as_mut_ptr(),
                 );
 
+                if gen_img_proj_transformer.is_null() {
+                    panic!("Failed to create image projection transformer");
+                }
+
                 (*warp_options).pTransformerArg = gen_img_proj_transformer;
 
+                (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
+
                 (*warp_options).eResampleAlg = GDALResampleAlg::GRA_Lanczos;
+
+                (*warp_options).hSrcDS = source_ds.c_dataset();
+
+                (*warp_options).hDstDS = target_dataset.c_dataset();
 
                 let warp_result = GDALReprojectImage(
                     source_ds.c_dataset(),
@@ -311,10 +326,8 @@ fn main() {
 
                 GDALDestroyGenImgProjTransformer(gen_img_proj_transformer);
 
-                warp_result
-            };
-
-            assert!(warp_result == CPLErr::CE_None, "Reprojection failed");
+                assert!(warp_result == CPLErr::CE_None, "Reprojection failed");
+            }
 
             pool.lock().unwrap().push(source_ds);
 
