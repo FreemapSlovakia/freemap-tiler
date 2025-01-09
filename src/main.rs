@@ -92,7 +92,7 @@ fn main() {
     }
     .compute_covered_tiles(max_zoom);
 
-    sort_by_zorder(&mut tiles);
+    Tile::sort_by_zorder(&mut tiles);
 
     let workers: Vec<Worker<_>> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
 
@@ -102,11 +102,7 @@ fn main() {
     let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
     let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
 
-    loop {
-        let Some(tile) = todo_dq.pop_front() else {
-            break;
-        };
-
+    while let Some(tile) = todo_dq.pop_front() {
         todo_set.remove(&tile);
 
         if tile.zoom == 0 {
@@ -160,7 +156,7 @@ fn main() {
                 .compare_exchange(old, secs as usize, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            println!("{} %", counter as f32 / total as f32 * 100.0);
+            println!("{:>3.3} %", counter as f32 / total as f32 * 100.0);
         }
 
         let rgb_buffer = if tile.zoom < max_zoom {
@@ -342,24 +338,6 @@ fn main() {
             });
         }
     });
-}
-
-fn sort_by_zorder(tiles: &mut [Tile]) {
-    tiles.sort_by_key(|tile| morton_code(tile.x, tile.y));
-}
-
-fn interleave(v: u32) -> u64 {
-    let mut result = 0u64;
-
-    for i in 0..32 {
-        result |= ((u64::from(v) >> i) & 1) << (2 * i);
-    }
-
-    result
-}
-
-fn morton_code(x: u32, y: u32) -> u64 {
-    interleave(x) | (interleave(y) << 1)
 }
 
 fn compute_bbox(dataset: &Dataset) -> BBox {

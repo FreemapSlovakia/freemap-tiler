@@ -67,6 +67,24 @@ impl Tile {
             },
         ]
     }
+
+    pub fn sort_by_zorder(tiles: &mut [Tile]) {
+        tiles.sort_by_key(|tile| Self::morton_code(tile.x, tile.y));
+    }
+
+    fn interleave(v: u32) -> u64 {
+        let mut result = 0u64;
+
+        for i in 0..32 {
+            result |= ((u64::from(v) >> i) & 1) << (2 * i);
+        }
+
+        result
+    }
+
+    fn morton_code(x: u32, y: u32) -> u64 {
+        Self::interleave(x) | (Self::interleave(y) << 1)
+    }
 }
 
 impl Display for Tile {
