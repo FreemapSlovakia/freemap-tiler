@@ -7,9 +7,10 @@ use crossbeam_deque::{Steal, Worker};
 use gdal::spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef};
 use gdal::{Dataset, DriverManager};
 use gdal_sys::{
-    CPLErr, GDALCreateGenImgProjTransformer2, GDALCreateWarpOptions,
-    GDALDestroyGenImgProjTransformer, GDALDestroyWarpOptions, GDALGenImgProjTransform,
-    GDALReprojectImage, GDALResampleAlg,
+    CPLErr, GDALChunkAndWarpImage, GDALCreateGenImgProjTransformer2, GDALCreateWarpOperation,
+    GDALCreateWarpOptions, GDALDestroyGenImgProjTransformer, GDALDestroyWarpOperation,
+    GDALDestroyWarpOptions, GDALGenImgProjTransform, GDALResampleAlg,
+    GDALWarpInitDefaultBandMapping,
 };
 use image::imageops::FilterType;
 use image::{ImageBuffer, RgbImage};
@@ -128,16 +129,7 @@ fn main() {
 
     let source_srs = SpatialRef::from_epsg(source_srs).expect("invalid epsg");
 
-    let source_wkt = CString::new(source_srs.to_wkt().expect("error producing WKT"))
-        .expect("CString::new failed");
-
     let target_srs = SpatialRef::from_epsg(target_srs).expect("invalid epsg");
-
-    let target_wkt = CString::new(target_srs.to_wkt().expect("error producing WKT"))
-        .expect("CString::new failed");
-
-    // let source_wkt = CString::new("EPSG:8353").unwrap();
-    // let target_wkt = CString::new("EPSG:3857").unwrap();
 
     let bbox = compute_bbox(&source_ds);
 
@@ -262,12 +254,12 @@ fn main() {
 
             let bbox = tile.bounds_to_epsg3857(tile_size);
 
-            let mut target_dataset = DriverManager::get_driver_by_name("MEM")
+            let mut target_ds = DriverManager::get_driver_by_name("MEM")
                 .expect("Failed to get MEM driver")
                 .create("", tile_size as usize, tile_size as usize, 3)
                 .expect("Failed to create target dataset");
 
-            target_dataset
+            target_ds
                 .set_geo_transform(&[
                     bbox.min_x,                                      // Top-left x
                     (bbox.max_x - bbox.min_x) / tile_size as f64,    // Pixel width
@@ -287,7 +279,7 @@ fn main() {
 
                 let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
                     source_ds.c_dataset(),
-                    target_dataset.c_dataset(),
+                    target_ds.c_dataset(),
                     options.as_mut_ptr(),
                 );
 
@@ -303,35 +295,39 @@ fn main() {
 
                 (*warp_options).hSrcDS = source_ds.c_dataset();
 
-                (*warp_options).hDstDS = target_dataset.c_dataset();
+                (*warp_options).hDstDS = target_ds.c_dataset();
 
-                let warp_result = GDALReprojectImage(
-                    source_ds.c_dataset(),
-                    source_wkt.as_ptr(),
-                    target_dataset.c_dataset(),
-                    target_wkt.as_ptr(),
-                    GDALResampleAlg::GRA_Lanczos,
-                    0.0,
-                    0.0,
-                    None,
-                    ptr::null_mut(),
-                    warp_options,
-                );
+                (*warp_options).nDstAlphaBand = 0;
 
-                drop(CString::from_raw(options[0]));
+                (*warp_options).nSrcAlphaBand = 0;
+
+                GDALWarpInitDefaultBandMapping(warp_options, 3);
+
+                let warp_operation = GDALCreateWarpOperation(warp_options);
+
+                let result =
+                    GDALChunkAndWarpImage(warp_operation, 0, 0, tile_size.into(), tile_size.into());
+
+                GDALDestroyWarpOperation(warp_operation);
 
                 GDALDestroyWarpOptions(warp_options);
 
                 GDALDestroyGenImgProjTransformer(gen_img_proj_transformer);
 
-                assert!(warp_result == CPLErr::CE_None, "Reprojection failed");
+                drop(CString::from_raw(options[0]));
+
+                assert!(
+                    result == CPLErr::CE_None,
+                    "ChunkAndWarpImage failed with error code: {:?}",
+                    result
+                );
             }
 
             pool.lock().unwrap().push(source_ds);
 
             let buffers: Vec<_> = (1..=3)
                 .map(|band| {
-                    target_dataset
+                    target_ds
                         .rasterband(band)
                         .expect("error getting raster band")
                         .read_as::<u8>(
@@ -361,15 +357,24 @@ fn main() {
 
         let mut vect = Vec::new();
 
-        let enc = Encoder::new(&mut vect, 85);
+        // produces bigger jpegs
+        // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
+        //     .write_image(
+        //         &rgb_buffer,
+        //         tile_size as u32,
+        //         tile_size as u32,
+        //         image::ExtendedColorType::Rgb8,
+        //     )
+        //     .expect("Failed to encode JPEG");
 
-        enc.encode(
-            &rgb_buffer,
-            tile_size as u16,
-            tile_size as u16,
-            ColorType::Rgb,
-        )
-        .expect("Failed to encode JPEG");
+        Encoder::new(&mut vect, 90)
+            .encode(
+                &rgb_buffer,
+                tile_size as u16,
+                tile_size as u16,
+                ColorType::Rgb,
+            )
+            .expect("Failed to encode JPEG");
 
         conn.lock()
             .unwrap()
