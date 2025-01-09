@@ -9,7 +9,7 @@ use gdal::{Dataset, DriverManager};
 use gdal_sys::{
     CPLErr, GDALCreateGenImgProjTransformer2, GDALCreateWarpOptions,
     GDALDestroyGenImgProjTransformer, GDALDestroyWarpOptions, GDALGenImgProjTransform,
-    GDALReprojectImage, GDALResampleAlg, GDALWarp, GDALWarpAppOptions,
+    GDALReprojectImage, GDALResampleAlg,
 };
 use image::imageops::FilterType;
 use image::{ImageBuffer, RgbImage};
@@ -17,7 +17,6 @@ use jpeg_encoder::{ColorType, Encoder};
 use rusqlite::{Connection, Error};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
-use std::os::raw::c_void;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -137,8 +136,8 @@ fn main() {
     let target_wkt = CString::new(target_srs.to_wkt().expect("error producing WKT"))
         .expect("CString::new failed");
 
-    let source_wkt = CString::new("EPSG:8353").unwrap();
-    let target_wkt = CString::new("EPSG:3857").unwrap();
+    // let source_wkt = CString::new("EPSG:8353").unwrap();
+    // let target_wkt = CString::new("EPSG:3857").unwrap();
 
     let bbox = compute_bbox(&source_ds);
 
@@ -165,17 +164,8 @@ fn main() {
 
     let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
 
-    for _ in 0..num_threads {
-        let Some(tile) = tiles.pop() else {
-            break;
-        };
-
-        workers[0].push(tile);
-    }
-
     let status = {
         let mut pending_set: HashSet<_> = tiles.iter().copied().collect();
-
         let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
         let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
 
@@ -199,6 +189,14 @@ fn main() {
             }
         }
 
+        for _ in 0..num_threads {
+            let Some(tile) = tiles.pop() else {
+                break;
+            };
+
+            workers[0].push(tile);
+        }
+
         Arc::new(Mutex::new(Status {
             pending_set,
             processed_set: HashSet::new(),
@@ -210,7 +208,7 @@ fn main() {
     let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
 
     let process_task = &move |tile: Tile, worker: &Worker<Tile>| {
-        println!("Processing {tile:?}");
+        println!("Processing {tile}");
 
         let rgb_buffer = if tile.zoom < max_zoom {
             let mut rgb_buffer = vec![0u8; tile_size as usize * tile_size as usize * 3 * 4];
@@ -435,7 +433,7 @@ fn main() {
 }
 
 fn sort_by_zorder(tiles: &mut Vec<Tile>) {
-    tiles.sort_by_key(|&tile| morton_code(tile.x, tile.y));
+    tiles.sort_by_key(|tile| morton_code(tile.x, tile.y));
 }
 
 fn interleave(v: u32) -> u64 {

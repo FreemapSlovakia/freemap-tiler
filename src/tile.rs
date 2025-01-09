@@ -1,4 +1,5 @@
 use crate::{bbox::BBox, geo::WEB_MERCATOR_EXTENT};
+use std::fmt::Display;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tile {
@@ -65,5 +66,11 @@ impl Tile {
                 zoom,
             },
         ]
+    }
+}
+
+impl Display for Tile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}/{}", self.zoom, self.x, self.y)
     }
 }
