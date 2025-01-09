@@ -3,6 +3,7 @@ mod geo;
 mod tile;
 
 use bbox::BBox;
+use clap::Parser;
 use crossbeam_deque::{Steal, Worker};
 use gdal::spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef};
 use gdal::{Dataset, DriverManager};
@@ -18,10 +19,49 @@ use jpeg_encoder::{ColorType, Encoder};
 use rusqlite::{Connection, Error};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
+use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, available_parallelism};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tile::Tile;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Input raster geofile
+    #[arg(long)]
+    source_file: PathBuf,
+
+    /// Output *.mbtiles file
+    #[arg(long)]
+    target_file: PathBuf,
+
+    /// Max zoom level
+    #[arg(long)]
+    max_zoom: u8,
+
+    /// Source SRS
+    #[arg(long)]
+    source_srs: Option<String>,
+
+    /// Projection transformation pipeline
+    #[arg(long)]
+    transform_pipeline: Option<String>,
+
+    /// Tile size
+    #[arg(long, default_value_t = 256)]
+    tile_size: u16,
+
+    /// Number of threads for parallel processing
+    #[arg(long, default_value = "available parallelism")]
+    num_threads: Option<u16>,
+
+    /// JPEG quality
+    #[arg(long, default_value_t = 85)]
+    jpeg_quality: u8,
+}
 
 fn compute_bbox(dataset: &Dataset) -> BBox {
     let geo_transform = dataset.geo_transform().unwrap();
@@ -47,7 +87,7 @@ fn compute_bbox(dataset: &Dataset) -> BBox {
     }
 }
 
-fn prepare_target(target_file: &str, max_zoom: u8) -> Result<Connection, Error> {
+fn prepare_target(target_file: &Path, max_zoom: u8) -> Result<Connection, Error> {
     let conn = Connection::open(target_file)?;
 
     conn.pragma_update(None, "synchronous", "OFF")?;
@@ -103,21 +143,27 @@ struct Status {
 }
 
 fn main() {
-    let max_zoom = 19;
+    let args = Args::parse();
 
-    let source_file = "/media/martin/14TB/ofmozaika/playground/SNINA_3-0.tif";
+    let max_zoom = args.max_zoom;
 
-    let target_file = "snina.mbtiles";
+    let source_file = args.source_file.as_path();
 
-    let source_srs = 8353;
+    let target_file = args.target_file.as_path();
+
+    let source_srs = args.source_srs.as_deref();
 
     let target_srs = 3857;
 
-    let pipeline = "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=hgridshift +grids=Slovakia_JTSK03_to_JTSK.gsb +step +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=485.021 +y=169.465 +z=483.839 +rx=-7.786342 +ry=-4.397554 +rz=-4.102655 +s=0 +convention=coordinate_frame +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84";
+    let pipeline = args.transform_pipeline.as_deref();
 
-    let tile_size = 256u16;
+    let tile_size = args.tile_size;
 
-    let num_threads = 24;
+    let num_threads = args.num_threads.unwrap_or_else(|| {
+        available_parallelism()
+            .expect("errro getting available parallelism")
+            .get() as u16
+    });
 
     let conn = Arc::new(Mutex::new(
         prepare_target(target_file, max_zoom).expect("error initializing mbtiles"),
@@ -127,7 +173,11 @@ fn main() {
 
     let source_ds = Dataset::open(source_file).expect("Error opening source");
 
-    let source_srs = SpatialRef::from_epsg(source_srs).expect("invalid epsg");
+    let source_srs = if let Some(source_srs) = source_srs {
+        SpatialRef::from_proj4(source_srs).expect("invalid proj4 SRS")
+    } else {
+        source_ds.spatial_ref().expect("error geting SRS")
+    };
 
     let target_srs = SpatialRef::from_epsg(target_srs).expect("invalid epsg");
 
@@ -135,7 +185,9 @@ fn main() {
 
     let mut options = CoordTransformOptions::new().unwrap();
 
-    options.set_coordinate_operation(pipeline, false).unwrap();
+    if let Some(pipeline) = pipeline {
+        options.set_coordinate_operation(pipeline, false).unwrap();
+    }
 
     let trans = CoordTransform::new_with_options(&source_srs, &target_srs, &options)
         .expect("Failed to create coordinate transform")
@@ -156,51 +208,70 @@ fn main() {
 
     let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
 
-    let status = {
-        let mut pending_set: HashSet<_> = tiles.iter().copied().collect();
-        let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
-        let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
+    let mut pending_set: HashSet<_> = tiles.iter().copied().collect();
+    let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
+    let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
 
-        loop {
-            let Some(tile) = todo_dq.pop_front() else {
-                break;
-            };
+    loop {
+        let Some(tile) = todo_dq.pop_front() else {
+            break;
+        };
 
-            todo_set.remove(&tile);
+        todo_set.remove(&tile);
 
-            if tile.zoom == 0 {
-                continue;
-            }
-
-            if let Some(parent_tile) = tile.get_parent() {
-                if todo_set.insert(parent_tile) {
-                    todo_dq.push_back(parent_tile);
-
-                    pending_set.insert(parent_tile);
-                }
-            }
+        if tile.zoom == 0 {
+            continue;
         }
 
-        for _ in 0..num_threads {
-            let Some(tile) = tiles.pop() else {
-                break;
-            };
+        if let Some(parent_tile) = tile.get_parent() {
+            if todo_set.insert(parent_tile) {
+                todo_dq.push_back(parent_tile);
 
-            workers[0].push(tile);
+                pending_set.insert(parent_tile);
+            }
         }
+    }
 
-        Arc::new(Mutex::new(Status {
-            pending_set,
-            processed_set: HashSet::new(),
-            waiting_set: HashSet::new(),
-            pending_vec: tiles,
-        }))
-    };
+    for _ in 0..num_threads {
+        let Some(tile) = tiles.pop() else {
+            break;
+        };
+
+        workers[0].push(tile);
+    }
+
+    let total = pending_set.len();
+    let counter = AtomicUsize::new(0);
+    let lg_ts = AtomicUsize::new(0);
+
+    let status = Arc::new(Mutex::new(Status {
+        pending_set,
+        processed_set: HashSet::new(),
+        waiting_set: HashSet::new(),
+        pending_vec: tiles,
+    }));
 
     let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
 
     let process_task = &move |tile: Tile, worker: &Worker<Tile>| {
-        println!("Processing {tile}");
+        // println!("Processing {tile}");
+
+        let counter = counter.fetch_add(1, Ordering::Relaxed);
+
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let old = lg_ts.load(Ordering::Relaxed);
+
+        if secs as usize != old
+            && lg_ts
+                .compare_exchange(old, secs as usize, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            println!("{} %", counter as f32 / total as f32 * 100.0);
+        }
 
         let rgb_buffer = if tile.zoom < max_zoom {
             let mut rgb_buffer = vec![0u8; tile_size as usize * tile_size as usize * 3 * 4];
@@ -273,23 +344,25 @@ fn main() {
             unsafe {
                 let warp_options = GDALCreateWarpOptions();
 
-                let option1 = CString::new(format!("COORDINATE_OPERATION={pipeline}")).unwrap();
+                if let Some(pipeline) = pipeline {
+                    let option = CString::new(format!("COORDINATE_OPERATION={pipeline}")).unwrap();
 
-                let mut options: Vec<*mut i8> = vec![option1.into_raw(), ptr::null_mut()];
+                    let mut options: Vec<*mut i8> = vec![option.into_raw(), ptr::null_mut()];
 
-                let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
-                    source_ds.c_dataset(),
-                    target_ds.c_dataset(),
-                    options.as_mut_ptr(),
-                );
+                    let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
+                        source_ds.c_dataset(),
+                        target_ds.c_dataset(),
+                        options.as_mut_ptr(),
+                    );
 
-                if gen_img_proj_transformer.is_null() {
-                    panic!("Failed to create image projection transformer");
+                    if gen_img_proj_transformer.is_null() {
+                        panic!("Failed to create image projection transformer");
+                    }
+
+                    (*warp_options).pTransformerArg = gen_img_proj_transformer;
+
+                    (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
                 }
-
-                (*warp_options).pTransformerArg = gen_img_proj_transformer;
-
-                (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
 
                 (*warp_options).eResampleAlg = GDALResampleAlg::GRA_Lanczos;
 
@@ -308,13 +381,13 @@ fn main() {
                 let result =
                     GDALChunkAndWarpImage(warp_operation, 0, 0, tile_size.into(), tile_size.into());
 
+                if (*warp_options).pTransformerArg.is_null() {
+                    GDALDestroyGenImgProjTransformer((*warp_options).pTransformerArg);
+                }
+
                 GDALDestroyWarpOperation(warp_operation);
 
                 GDALDestroyWarpOptions(warp_options);
-
-                GDALDestroyGenImgProjTransformer(gen_img_proj_transformer);
-
-                drop(CString::from_raw(options[0]));
 
                 assert!(
                     result == CPLErr::CE_None,
@@ -367,7 +440,7 @@ fn main() {
         //     )
         //     .expect("Failed to encode JPEG");
 
-        Encoder::new(&mut vect, 90)
+        Encoder::new(&mut vect, args.jpeg_quality)
             .encode(
                 &rgb_buffer,
                 tile_size as u16,

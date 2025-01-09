@@ -1,9 +1,10 @@
 [package]
-name = "tiler"
+name = "freemap-tiler"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4.5.25", features = ["derive"] }
 crossbeam-deque = { version = "0.8.4" }
 gdal = { version = "0.17.1", features = ["bindgen"] }
 gdal-sys = "0.10.0"
