@@ -23,7 +23,7 @@ impl BBox {
 
         for x in min_tile_x..=max_tile_x {
             for y in min_tile_y..=max_tile_y {
-                tiles.push(Tile { x, y, zoom });
+                tiles.push(Tile { zoom, x, y });
             }
         }
 

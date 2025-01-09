@@ -23,13 +23,13 @@ impl Tile {
 
         BBox {
             min_x,
-            min_y,
             max_x,
+            min_y,
             max_y,
         }
     }
 
-    pub fn get_parent(&self) -> Option<Self> {
+    pub const fn get_parent(&self) -> Option<Self> {
         if self.zoom == 0 {
             None
         } else {
@@ -41,7 +41,7 @@ impl Tile {
         }
     }
 
-    pub fn get_children(&self) -> [Self; 4] {
+    pub const fn get_children(&self) -> [Self; 4] {
         let zoom = self.zoom + 1;
 
         [

@@ -1,139 +1,32 @@
+mod args;
 mod bbox;
 mod geo;
 mod tile;
+mod warp;
 
+use args::Args;
 use bbox::BBox;
 use clap::Parser;
-use crossbeam_deque::{Steal, Worker};
-use gdal::spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef};
-use gdal::{Dataset, DriverManager};
-use gdal_sys::{
-    CPLErr, GDALChunkAndWarpImage, GDALCreateGenImgProjTransformer2, GDALCreateWarpOperation,
-    GDALCreateWarpOptions, GDALDestroyGenImgProjTransformer, GDALDestroyWarpOperation,
-    GDALDestroyWarpOptions, GDALGenImgProjTransform, GDALResampleAlg,
-    GDALWarpInitDefaultBandMapping,
+use crossbeam_deque::{Steal, Stealer, Worker};
+use gdal::{
+    spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
+    Dataset, DriverManager,
 };
-use image::imageops::FilterType;
-use image::{ImageBuffer, RgbImage};
+use image::{imageops::FilterType, ImageBuffer, RgbImage};
 use jpeg_encoder::{ColorType, Encoder};
 use rusqlite::{Connection, Error};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::ffi::CString;
-use std::path::{Path, PathBuf};
-use std::ptr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, available_parallelism};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fs::remove_file,
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, available_parallelism},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tile::Tile;
-
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Input raster geofile
-    #[arg(long)]
-    source_file: PathBuf,
-
-    /// Output *.mbtiles file
-    #[arg(long)]
-    target_file: PathBuf,
-
-    /// Max zoom level
-    #[arg(long)]
-    max_zoom: u8,
-
-    /// Source SRS
-    #[arg(long)]
-    source_srs: Option<String>,
-
-    /// Projection transformation pipeline
-    #[arg(long)]
-    transform_pipeline: Option<String>,
-
-    /// Tile size
-    #[arg(long, default_value_t = 256)]
-    tile_size: u16,
-
-    /// Number of threads for parallel processing
-    #[arg(long, default_value = "available parallelism")]
-    num_threads: Option<u16>,
-
-    /// JPEG quality
-    #[arg(long, default_value_t = 85)]
-    jpeg_quality: u8,
-}
-
-fn compute_bbox(dataset: &Dataset) -> BBox {
-    let geo_transform = dataset.geo_transform().unwrap();
-
-    // Extract values from the GeoTransform
-    let min_x = geo_transform[0]; // Top-left x
-    let max_y = geo_transform[3]; // Top-left y
-    let pixel_width = geo_transform[1];
-    let pixel_height = geo_transform[5]; // Note: Typically negative for top-down
-
-    // Get dataset size
-    let raster_size = dataset.raster_size();
-
-    // Calculate max_x and min_y
-    let max_x = min_x + (raster_size.0 as f64) * pixel_width;
-    let min_y = max_y + (raster_size.1 as f64) * pixel_height;
-
-    BBox {
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-    }
-}
-
-fn prepare_target(target_file: &Path, max_zoom: u8) -> Result<Connection, Error> {
-    let conn = Connection::open(target_file)?;
-
-    conn.pragma_update(None, "synchronous", "OFF")?;
-
-    conn.execute(
-        "CREATE TABLE metadata (
-            name TEXT NOT NULL,
-            value TEXT NOT NULL,
-            UNIQUE(name)
-        )",
-        (),
-    )?;
-
-    conn.execute(
-        "CREATE TABLE tiles (
-            zoom_level INTEGER NOT NULL,
-            tile_column INTEGER NOT NULL,
-            tile_row INTEGER NOT NULL,
-            tile_data BLOB NOT NULL,
-            PRIMARY KEY (zoom_level, tile_column, tile_row)
-        )",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('name', 'Snina');",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('format', 'jpeg');",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('minzoom', 0);",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('maxzoom', ?1);",
-        [max_zoom],
-    )?;
-
-    Ok(conn)
-}
 
 struct Status {
     pending_set: HashSet<Tile>,
@@ -153,8 +46,6 @@ fn main() {
 
     let source_srs = args.source_srs.as_deref();
 
-    let target_srs = 3857;
-
     let pipeline = args.transform_pipeline.as_deref();
 
     let tile_size = args.tile_size;
@@ -173,13 +64,12 @@ fn main() {
 
     let source_ds = Dataset::open(source_file).expect("Error opening source");
 
-    let source_srs = if let Some(source_srs) = source_srs {
-        SpatialRef::from_proj4(source_srs).expect("invalid proj4 SRS")
-    } else {
-        source_ds.spatial_ref().expect("error geting SRS")
-    };
+    let source_srs = source_srs.map_or_else(
+        || source_ds.spatial_ref().expect("error geting SRS"),
+        |source_srs| SpatialRef::from_proj4(source_srs).expect("invalid proj4 SRS"),
+    );
 
-    let target_srs = SpatialRef::from_epsg(target_srs).expect("invalid epsg");
+    let target_srs = SpatialRef::from_epsg(3857).expect("invalid epsg");
 
     let bbox = compute_bbox(&source_ds);
 
@@ -281,37 +171,39 @@ fn main() {
             for (i, sector) in tile
                 .get_children()
                 .iter()
-                .map(|tile| buffer_cache.remove(&tile))
+                .map(|tile| buffer_cache.remove(tile))
                 .enumerate()
             {
                 let Some(sector) = sector else {
                     continue;
                 };
 
-                let soy = (i & 1) * tile_size as usize;
-                let sox = ((i >> 1) & 1) * tile_size as usize;
+                let so_y = (i & 1) * tile_size as usize;
+                let so_x = ((i >> 1) & 1) * tile_size as usize;
 
                 for x in 0..tile_size as usize {
                     for y in 0..tile_size as usize {
-                        let offset1 = ((x + sox) * tile_size as usize * 2 + (y + soy)) * 3;
+                        let offset1 = ((x + so_x) * tile_size as usize * 2 + (y + so_y)) * 3;
 
                         let offset2 = (x * tile_size as usize + y) * 3;
 
-                        for band in 0..3 {
-                            rgb_buffer[offset1 + band] = sector[offset2 + band];
-                        }
+                        rgb_buffer[offset1..(3 + offset1)]
+                            .copy_from_slice(&sector[offset2..(3 + offset2)]);
                     }
                 }
             }
 
-            let img: RgbImage =
-                ImageBuffer::from_vec(tile_size as u32 * 2, tile_size as u32 * 2, rgb_buffer)
-                    .expect("Invalid image dimensions");
+            let img: RgbImage = ImageBuffer::from_vec(
+                u32::from(tile_size) * 2,
+                u32::from(tile_size) * 2,
+                rgb_buffer,
+            )
+            .expect("Invalid image dimensions");
 
             image::imageops::resize(
                 &img,
-                tile_size as u32,
-                tile_size as u32,
+                u32::from(tile_size),
+                u32::from(tile_size),
                 FilterType::Lanczos3,
             )
             .into_raw()
@@ -332,69 +224,16 @@ fn main() {
 
             target_ds
                 .set_geo_transform(&[
-                    bbox.min_x,                                      // Top-left x
-                    (bbox.max_x - bbox.min_x) / tile_size as f64,    // Pixel width
-                    0.0,                                             // Rotation (x-axis)
-                    bbox.max_y,                                      // Top-left y
-                    0.0,                                             // Rotation (y-axis)
-                    -((bbox.max_y - bbox.min_y) / tile_size as f64), // Pixel height (negative for top-down)
+                    bbox.min_x,                                          // Top-left x
+                    (bbox.max_x - bbox.min_x) / f64::from(tile_size),    // Pixel width
+                    0.0,                                                 // Rotation (x-axis)
+                    bbox.max_y,                                          // Top-left y
+                    0.0,                                                 // Rotation (y-axis)
+                    -((bbox.max_y - bbox.min_y) / f64::from(tile_size)), // Pixel height (negative for top-down)
                 ])
                 .expect("error setting geo transform");
 
-            unsafe {
-                let warp_options = GDALCreateWarpOptions();
-
-                if let Some(pipeline) = pipeline {
-                    let option = CString::new(format!("COORDINATE_OPERATION={pipeline}")).unwrap();
-
-                    let mut options: Vec<*mut i8> = vec![option.into_raw(), ptr::null_mut()];
-
-                    let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
-                        source_ds.c_dataset(),
-                        target_ds.c_dataset(),
-                        options.as_mut_ptr(),
-                    );
-
-                    if gen_img_proj_transformer.is_null() {
-                        panic!("Failed to create image projection transformer");
-                    }
-
-                    (*warp_options).pTransformerArg = gen_img_proj_transformer;
-
-                    (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
-                }
-
-                (*warp_options).eResampleAlg = GDALResampleAlg::GRA_Lanczos;
-
-                (*warp_options).hSrcDS = source_ds.c_dataset();
-
-                (*warp_options).hDstDS = target_ds.c_dataset();
-
-                (*warp_options).nDstAlphaBand = 0;
-
-                (*warp_options).nSrcAlphaBand = 0;
-
-                GDALWarpInitDefaultBandMapping(warp_options, 3);
-
-                let warp_operation = GDALCreateWarpOperation(warp_options);
-
-                let result =
-                    GDALChunkAndWarpImage(warp_operation, 0, 0, tile_size.into(), tile_size.into());
-
-                if (*warp_options).pTransformerArg.is_null() {
-                    GDALDestroyGenImgProjTransformer((*warp_options).pTransformerArg);
-                }
-
-                GDALDestroyWarpOperation(warp_operation);
-
-                GDALDestroyWarpOptions(warp_options);
-
-                assert!(
-                    result == CPLErr::CE_None,
-                    "ChunkAndWarpImage failed with error code: {:?}",
-                    result
-                );
-            }
+            warp::warp(&source_ds, &target_ds, tile_size, pipeline);
 
             pool.lock().unwrap().push(source_ds);
 
@@ -441,12 +280,7 @@ fn main() {
         //     .expect("Failed to encode JPEG");
 
         Encoder::new(&mut vect, args.jpeg_quality)
-            .encode(
-                &rgb_buffer,
-                tile_size as u16,
-                tile_size as u16,
-                ColorType::Rgb,
-            )
+            .encode(&rgb_buffer, tile_size, tile_size, ColorType::Rgb)
             .expect("Failed to encode JPEG");
 
         conn.lock()
@@ -496,7 +330,7 @@ fn main() {
                     }
                     // If no tasks locally, try to steal from other threads
                     else if let Steal::Success(task) =
-                        stealers.iter().map(|s| s.steal()).collect::<Steal<_>>()
+                        stealers.iter().map(Stealer::steal).collect::<Steal<_>>()
                     {
                         process_task(task, &worker);
                     }
@@ -510,7 +344,7 @@ fn main() {
     });
 }
 
-fn sort_by_zorder(tiles: &mut Vec<Tile>) {
+fn sort_by_zorder(tiles: &mut [Tile]) {
     tiles.sort_by_key(|tile| morton_code(tile.x, tile.y));
 }
 
@@ -518,7 +352,7 @@ fn interleave(v: u32) -> u64 {
     let mut result = 0u64;
 
     for i in 0..32 {
-        result |= ((v as u64 >> i) & 1) << (2 * i);
+        result |= ((u64::from(v) >> i) & 1) << (2 * i);
     }
 
     result
@@ -526,4 +360,79 @@ fn interleave(v: u32) -> u64 {
 
 fn morton_code(x: u32, y: u32) -> u64 {
     interleave(x) | (interleave(y) << 1)
+}
+
+fn compute_bbox(dataset: &Dataset) -> BBox {
+    let geo_transform = dataset.geo_transform().unwrap();
+
+    let min_x = geo_transform[0]; // Top-left x
+    let max_y = geo_transform[3]; // Top-left y
+    let pixel_width = geo_transform[1];
+    let pixel_height = geo_transform[5]; // Note: Typically negative for top-down
+
+    // Get dataset size
+    let raster_size = dataset.raster_size();
+
+    // Calculate max_x and min_y
+    let max_x = (raster_size.0 as f64).mul_add(pixel_width, min_x);
+    let min_y = (raster_size.1 as f64).mul_add(pixel_height, max_y);
+
+    BBox {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+    }
+}
+
+fn prepare_target(target_file: &Path, max_zoom: u8) -> Result<Connection, Error> {
+    if target_file.exists() {
+        remove_file(target_file).expect("error deleting file");
+    }
+
+    let conn = Connection::open(target_file)?;
+
+    conn.pragma_update(None, "synchronous", "OFF")?;
+
+    conn.execute(
+        "CREATE TABLE metadata (
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            UNIQUE(name)
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE TABLE tiles (
+            zoom_level INTEGER NOT NULL,
+            tile_column INTEGER NOT NULL,
+            tile_row INTEGER NOT NULL,
+            tile_data BLOB NOT NULL,
+            PRIMARY KEY (zoom_level, tile_column, tile_row)
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "INSERT INTO metadata (name, value) VALUES ('name', 'Snina');",
+        (),
+    )?;
+
+    conn.execute(
+        "INSERT INTO metadata (name, value) VALUES ('format', 'jpeg');",
+        (),
+    )?;
+
+    conn.execute(
+        "INSERT INTO metadata (name, value) VALUES ('minzoom', 0);",
+        (),
+    )?;
+
+    conn.execute(
+        "INSERT INTO metadata (name, value) VALUES ('maxzoom', ?1);",
+        [max_zoom],
+    )?;
+
+    Ok(conn)
 }
