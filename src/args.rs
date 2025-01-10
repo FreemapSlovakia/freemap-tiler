@@ -28,8 +28,8 @@ pub struct Args {
     #[arg(long, default_value_t = 256)]
     pub tile_size: u16,
 
-    /// Number of threads for parallel processing
-    #[arg(long, default_value = "available parallelism")]
+    /// Number of threads for parallel processing [default: available parallelism]
+    #[arg(long)]
     pub num_threads: Option<u16>,
 
     /// JPEG quality

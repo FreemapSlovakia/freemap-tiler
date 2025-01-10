@@ -30,7 +30,7 @@ Options:
       --tile-size <TILE_SIZE>
           Tile size [default: 256]
       --num-threads <NUM_THREADS>
-          Number of threads for parallel processing [default: "available parallelism"]
+          Number of threads for parallel processing [default: available parallelism]
       --jpeg-quality <JPEG_QUALITY>
           JPEG quality [default: 85]
   -h, --help

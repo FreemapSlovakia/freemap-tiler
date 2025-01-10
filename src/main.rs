@@ -66,7 +66,7 @@ fn main() {
 
     let source_srs = source_srs.map_or_else(
         || source_ds.spatial_ref().expect("error geting SRS"),
-        |source_srs| SpatialRef::from_proj4(source_srs).expect("invalid proj4 SRS"),
+        |source_srs| SpatialRef::from_definition(source_srs).expect("invalid proj4 SRS"),
     );
 
     let target_srs = SpatialRef::from_epsg(3857).expect("invalid epsg");
@@ -164,15 +164,15 @@ fn main() {
 
             let mut buffer_cache = buffer_cache.lock().unwrap();
 
+            let mut has_data = false;
+
             for (i, sector) in tile
                 .get_children()
                 .iter()
-                .map(|tile| buffer_cache.remove(tile))
+                .filter_map(|tile| buffer_cache.remove(tile))
                 .enumerate()
             {
-                let Some(sector) = sector else {
-                    continue;
-                };
+                has_data = true;
 
                 let so_y = (i & 1) * tile_size as usize;
                 let so_x = ((i >> 1) & 1) * tile_size as usize;
@@ -189,20 +189,26 @@ fn main() {
                 }
             }
 
-            let img: RgbImage = ImageBuffer::from_vec(
-                u32::from(tile_size) * 2,
-                u32::from(tile_size) * 2,
-                rgb_buffer,
-            )
-            .expect("Invalid image dimensions");
+            if has_data {
+                let img: RgbImage = ImageBuffer::from_vec(
+                    u32::from(tile_size) * 2,
+                    u32::from(tile_size) * 2,
+                    rgb_buffer,
+                )
+                .expect("Invalid image dimensions");
 
-            image::imageops::resize(
-                &img,
-                u32::from(tile_size),
-                u32::from(tile_size),
-                FilterType::Lanczos3,
-            )
-            .into_raw()
+                Some(
+                    image::imageops::resize(
+                        &img,
+                        u32::from(tile_size),
+                        u32::from(tile_size),
+                        FilterType::Lanczos3,
+                    )
+                    .into_raw(),
+                )
+            } else {
+                None
+            }
         } else {
             let ds = pool.lock().unwrap().pop();
 
@@ -250,44 +256,54 @@ fn main() {
 
             let mut rgb_buffer = vec![0u8; tile_size as usize * tile_size as usize * 3];
 
+            let mut has_data = false;
+
             for x in 0..tile_size as usize {
                 for y in 0..tile_size as usize {
                     let offset = (x * tile_size as usize + y) * 3;
 
                     for (i, buffer) in buffers.iter().enumerate() {
-                        rgb_buffer[offset + i] = buffer[(x, y)];
+                        let b = buffer[(x, y)];
+                        rgb_buffer[offset + i] = b;
+                        has_data = has_data || (b != 0);
                     }
                 }
             }
 
-            rgb_buffer
+            if has_data {
+                Some(rgb_buffer)
+            } else {
+                None
+            }
         };
 
-        let mut vect = Vec::new();
+        if let Some(rgb_buffer) = rgb_buffer {
+            let mut vect = Vec::new();
 
-        // produces bigger jpegs
-        // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
-        //     .write_image(
-        //         &rgb_buffer,
-        //         tile_size as u32,
-        //         tile_size as u32,
-        //         image::ExtendedColorType::Rgb8,
-        //     )
-        //     .expect("Failed to encode JPEG");
+            // produces bigger jpegs
+            // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
+            //     .write_image(
+            //         &rgb_buffer,
+            //         tile_size as u32,
+            //         tile_size as u32,
+            //         image::ExtendedColorType::Rgb8,
+            //     )
+            //     .expect("Failed to encode JPEG");
 
-        Encoder::new(&mut vect, args.jpeg_quality)
-            .encode(&rgb_buffer, tile_size, tile_size, ColorType::Rgb)
-            .expect("Failed to encode JPEG");
+            Encoder::new(&mut vect, args.jpeg_quality)
+                .encode(&rgb_buffer, tile_size, tile_size, ColorType::Rgb)
+                .expect("Failed to encode JPEG");
 
-        conn.lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4)",
-                (tile.zoom, tile.x, (1 << tile.zoom) - 1 - tile.y, vect),
-            )
-            .expect("error inserting a tile");
+            conn.lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4)",
+                    (tile.zoom, tile.x, (1 << tile.zoom) - 1 - tile.y, vect),
+                )
+                .expect("error inserting a tile");
 
-        buffer_cache.lock().unwrap().insert(tile, rgb_buffer);
+            buffer_cache.lock().unwrap().insert(tile, rgb_buffer);
+        }
 
         let mut status = status.lock().unwrap();
 
