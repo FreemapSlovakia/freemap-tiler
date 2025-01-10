@@ -156,7 +156,7 @@ fn main() {
                 .compare_exchange(old, secs as usize, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            println!("{:>3.3} %", counter as f32 / total as f32 * 100.0);
+            println!("{:.2} %", counter as f32 / total as f32 * 100.0);
         }
 
         let rgb_buffer = if tile.zoom < max_zoom {
@@ -169,9 +169,13 @@ fn main() {
             for (i, sector) in tile
                 .get_children()
                 .iter()
-                .filter_map(|tile| buffer_cache.remove(tile))
+                .map(|tile| buffer_cache.remove(tile))
                 .enumerate()
             {
+                let Some(sector) = sector else {
+                    continue;
+                };
+
                 has_data = true;
 
                 let so_y = (i & 1) * tile_size as usize;
