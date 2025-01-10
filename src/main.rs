@@ -66,7 +66,7 @@ fn main() {
 
     let source_srs = source_srs.map_or_else(
         || source_ds.spatial_ref().expect("error geting SRS"),
-        |source_srs| SpatialRef::from_definition(source_srs).expect("invalid proj4 SRS"),
+        |source_srs| SpatialRef::from_definition(source_srs).expect("invalid spatial reference"),
     );
 
     let target_srs = SpatialRef::from_epsg(3857).expect("invalid epsg");
