@@ -156,22 +156,30 @@ fn main() {
                 .compare_exchange(old, secs as usize, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            println!("{:.2} %", counter as f32 / total as f32 * 100.0);
+            println!(
+                "{:.2} % | {}",
+                counter as f32 / total as f32 * 100.0,
+                buffer_cache.lock().unwrap().len()
+            );
         }
 
         let rgb_buffer = if tile.zoom < max_zoom {
             let mut rgb_buffer = vec![0u8; tile_size as usize * tile_size as usize * 3 * 4];
 
-            let mut buffer_cache = buffer_cache.lock().unwrap();
-
             let mut has_data = false;
 
-            for (i, sector) in tile
-                .get_children()
+            let children = tile.get_children();
+
+            let mut buffer_cache = buffer_cache.lock().unwrap();
+
+            let sectors: Vec<_> = children
                 .iter()
                 .map(|tile| buffer_cache.remove(tile))
-                .enumerate()
-            {
+                .collect();
+
+            drop(buffer_cache); // just for sure
+
+            for (i, sector) in sectors.into_iter().enumerate() {
                 let Some(sector) = sector else {
                     continue;
                 };

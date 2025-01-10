@@ -14,7 +14,9 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, pipeline: 
         if let Some(pipeline) = pipeline {
             let option = CString::new(format!("COORDINATE_OPERATION={pipeline}")).unwrap();
 
-            let mut options: Vec<*mut i8> = vec![option.into_raw(), ptr::null_mut()];
+            let option = option.into_raw();
+
+            let mut options: Vec<*mut i8> = vec![option, ptr::null_mut()];
 
             let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
                 source_ds.c_dataset(),
@@ -30,6 +32,8 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, pipeline: 
             (*warp_options).pTransformerArg = gen_img_proj_transformer;
 
             (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
+
+            drop(CString::from_raw(option));
         }
 
         (*warp_options).eResampleAlg = GDALResampleAlg::GRA_Lanczos;
@@ -49,7 +53,7 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, pipeline: 
         let result =
             GDALChunkAndWarpImage(warp_operation, 0, 0, tile_size.into(), tile_size.into());
 
-        if (*warp_options).pTransformerArg.is_null() {
+        if !(*warp_options).pTransformerArg.is_null() {
             GDALDestroyGenImgProjTransformer((*warp_options).pTransformerArg);
         }
 
