@@ -46,7 +46,7 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, pipeline: 
 
         (*warp_options).nSrcAlphaBand = 0;
 
-        GDALWarpInitDefaultBandMapping(warp_options, 3);
+        GDALWarpInitDefaultBandMapping(warp_options, source_ds.raster_count() as i32);
 
         let warp_operation = GDALCreateWarpOperation(warp_options);
 

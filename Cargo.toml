@@ -11,3 +11,4 @@ gdal-sys = "0.10.0"
 image = { version = "0.25.5", default-features = false, features = ["jpeg"] }
 jpeg-encoder = "0.6.0"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+zstd = "0.13.2"

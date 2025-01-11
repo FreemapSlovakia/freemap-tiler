@@ -12,12 +12,12 @@ use gdal::{
     spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
     Dataset, DriverManager,
 };
-use image::{imageops::FilterType, ImageBuffer, RgbImage};
-use jpeg_encoder::{ColorType, Encoder};
+use image::{imageops::FilterType, DynamicImage, GrayImage, ImageBuffer, RgbImage};
 use rusqlite::{Connection, Error};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::remove_file,
+    io::Write,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -63,6 +63,8 @@ fn main() {
     let pool = Arc::new(Mutex::new(Vec::<Dataset>::new()));
 
     let source_ds = Dataset::open(source_file).expect("Error opening source");
+
+    let band_count = source_ds.raster_count();
 
     let source_srs = source_srs.map_or_else(
         || source_ds.spatial_ref().expect("error geting SRS"),
@@ -140,8 +142,6 @@ fn main() {
     let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
 
     let process_task = &move |tile: Tile, worker: &Worker<Tile>| {
-        // println!("Processing {tile}");
-
         let counter = counter.fetch_add(1, Ordering::Relaxed);
 
         let secs = SystemTime::now()
@@ -163,10 +163,13 @@ fn main() {
             );
         }
 
-        let rgb_buffer = if tile.zoom < max_zoom {
-            let mut rgb_buffer = vec![0u8; tile_size as usize * tile_size as usize * 3 * 4];
+        let res = if tile.zoom < max_zoom {
+            let mut out_buffer =
+                vec![0u8; tile_size as usize * tile_size as usize * band_count * 4];
 
             let mut has_data = false;
+
+            let mut is_white = true;
 
             let children = tile.get_children();
 
@@ -191,25 +194,39 @@ fn main() {
 
                 for x in 0..tile_size as usize {
                     for y in 0..tile_size as usize {
-                        let offset1 = ((x + so_x) * tile_size as usize * 2 + (y + so_y)) * 3;
+                        let offset1 =
+                            ((x + so_x) * tile_size as usize * 2 + (y + so_y)) * band_count;
 
-                        let offset2 = (x * tile_size as usize + y) * 3;
+                        let offset2 = (x * tile_size as usize + y) * band_count;
 
-                        rgb_buffer[offset1..(3 + offset1)]
-                            .copy_from_slice(&sector[offset2..(3 + offset2)]);
+                        out_buffer[offset1..(band_count + offset1)]
+                            .copy_from_slice(&sector[offset2..(band_count + offset2)]);
+
+                        is_white = is_white && (out_buffer[offset1] == 255);
                     }
                 }
             }
 
             if has_data {
-                let img: RgbImage = ImageBuffer::from_vec(
-                    u32::from(tile_size) * 2,
-                    u32::from(tile_size) * 2,
-                    rgb_buffer,
-                )
-                .expect("Invalid image dimensions");
+                let img: DynamicImage = if band_count == 3 {
+                    RgbImage::from_vec(
+                        u32::from(tile_size) * 2,
+                        u32::from(tile_size) * 2,
+                        out_buffer,
+                    )
+                    .expect("Invalid image dimensions")
+                    .into()
+                } else {
+                    GrayImage::from_vec(
+                        u32::from(tile_size) * 2,
+                        u32::from(tile_size) * 2,
+                        out_buffer,
+                    )
+                    .expect("Invalid image dimensions")
+                    .into()
+                };
 
-                Some(
+                Some((
                     image::imageops::resize(
                         &img,
                         u32::from(tile_size),
@@ -217,7 +234,8 @@ fn main() {
                         FilterType::Lanczos3,
                     )
                     .into_raw(),
-                )
+                    is_white,
+                ))
             } else {
                 None
             }
@@ -233,7 +251,7 @@ fn main() {
 
             let mut target_ds = DriverManager::get_driver_by_name("MEM")
                 .expect("Failed to get MEM driver")
-                .create("", tile_size as usize, tile_size as usize, 3)
+                .create("", tile_size as usize, tile_size as usize, band_count)
                 .expect("Failed to create target dataset");
 
             target_ds
@@ -251,7 +269,7 @@ fn main() {
 
             pool.lock().unwrap().push(source_ds);
 
-            let buffers: Vec<_> = (1..=3)
+            let buffers: Vec<_> = (1..=band_count)
                 .map(|band| {
                     target_ds
                         .rasterband(band)
@@ -266,55 +284,75 @@ fn main() {
                 })
                 .collect();
 
-            let mut rgb_buffer = vec![0u8; tile_size as usize * tile_size as usize * 3];
+            let mut out_buffer = vec![0u8; tile_size as usize * tile_size as usize * band_count];
 
             let mut has_data = false;
 
+            let mut is_white = true;
+
             for x in 0..tile_size as usize {
                 for y in 0..tile_size as usize {
-                    let offset = (x * tile_size as usize + y) * 3;
+                    let offset = (x * tile_size as usize + y) * band_count;
 
                     for (i, buffer) in buffers.iter().enumerate() {
                         let b = buffer[(x, y)];
-                        rgb_buffer[offset + i] = b;
+                        out_buffer[offset + i] = b;
                         has_data = has_data || (b != 0);
+                        is_white = is_white && (b == 255);
                     }
                 }
             }
 
             if has_data {
-                Some(rgb_buffer)
+                Some((out_buffer, is_white))
             } else {
                 None
             }
         };
 
-        if let Some(rgb_buffer) = rgb_buffer {
+        if let Some((out_buffer, is_white)) = res {
             let mut vect = Vec::new();
 
             // produces bigger jpegs
             // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
             //     .write_image(
-            //         &rgb_buffer,
+            //         &out_buffer,
             //         tile_size as u32,
             //         tile_size as u32,
             //         image::ExtendedColorType::Rgb8,
             //     )
             //     .expect("Failed to encode JPEG");
 
-            Encoder::new(&mut vect, args.jpeg_quality)
-                .encode(&rgb_buffer, tile_size, tile_size, ColorType::Rgb)
-                .expect("Failed to encode JPEG");
+            if !is_white {
+                // nothing
+            } else if band_count == 3 {
+                jpeg_encoder::Encoder::new(&mut vect, args.jpeg_quality)
+                    .encode(
+                        &out_buffer,
+                        tile_size,
+                        tile_size,
+                        jpeg_encoder::ColorType::Rgb,
+                    )
+                    .expect("Failed to encode JPEG");
+            } else {
+                let mut encoder = zstd::stream::write::Encoder::new(&mut vect, 0)
+                    .expect("error creating zstd encoder");
 
-            conn.lock()
-                .unwrap()
-                .execute(
-                    "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4)",
-                    (tile.zoom, tile.x, (1 << tile.zoom) - 1 - tile.y, vect),
-                )
-                .expect("error inserting a tile");
+                encoder.write(&out_buffer).expect("error zstd encoding");
 
-            buffer_cache.lock().unwrap().insert(tile, rgb_buffer);
+                encoder.finish().expect("error finishing zstd encoding");
+            }
+
+            println!("Inserting {tile}");
+
+            if let Err(error) = conn.lock().unwrap().execute(
+                "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4)",
+                (tile.zoom, tile.x, (1 << tile.zoom) - 1 - tile.y, vect),
+            ) {
+                panic!("Err: {tile} {error}");
+            }
+
+            buffer_cache.lock().unwrap().insert(tile, out_buffer);
         }
 
         let mut status = status.lock().unwrap();
