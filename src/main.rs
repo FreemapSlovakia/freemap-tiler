@@ -16,7 +16,6 @@ use image::{imageops::FilterType, DynamicImage, GrayImage, RgbImage};
 use rusqlite::{Connection, Error};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs::remove_file,
     io::Write,
     path::Path,
     sync::{
@@ -431,7 +430,7 @@ fn compute_bbox(dataset: &Dataset) -> BBox {
 
 fn prepare_target(target_file: &Path, max_zoom: u8) -> Result<Connection, Error> {
     if target_file.exists() {
-        remove_file(target_file).expect("error deleting file");
+        panic!("target file exists");
     }
 
     let conn = Connection::open(target_file)?;
