@@ -12,7 +12,7 @@ use gdal::{
     spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
     Dataset, DriverManager,
 };
-use image::{imageops::FilterType, DynamicImage, GrayImage, ImageBuffer, RgbImage};
+use image::{imageops::FilterType, DynamicImage, GrayImage, RgbImage};
 use rusqlite::{Connection, Error};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
