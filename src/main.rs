@@ -1,6 +1,7 @@
 mod args;
 mod bbox;
 mod geo;
+mod schema;
 mod tile;
 mod warp;
 
@@ -12,12 +13,13 @@ use gdal::{
     spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
     Dataset, DriverManager,
 };
+use geo::compute_bbox;
 use image::{imageops::FilterType, GrayImage, RgbImage};
-use rusqlite::{Connection, Error};
+use rusqlite::Connection;
+use schema::create_schema;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::Write,
-    path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -55,9 +57,15 @@ fn main() {
             .get() as u16
     });
 
-    let conn = Arc::new(Mutex::new(
-        prepare_target(target_file, max_zoom).expect("error initializing mbtiles"),
-    ));
+    if target_file.exists() {
+        panic!("target file exists");
+    }
+
+    let conn = Connection::open(target_file).expect("error creating output");
+
+    create_schema(&conn, 19).expect("error initializing schema");
+
+    let conn = Arc::new(Mutex::new(conn));
 
     let pool = Arc::new(Mutex::new(Vec::<Dataset>::new()));
 
@@ -257,12 +265,14 @@ fn main() {
                     .into_raw()
                 }))
             }
-        } else if is_mask
-            && (tile.x > 291469 && tile.x < 294182 && tile.y > 179392 && tile.y < 180962
-                || tile.x > 289480 && tile.x < 291351 && tile.y > 179638 && tile.y < 181703
-                || tile.x > 288969 && tile.x < 290916 && tile.y > 179184 && tile.y < 180104)
-        {
-            Some(TileData::White)
+        // } else if is_mask
+        //     && (
+        //         // tile.x > 291469 && tile.x < 294182 && tile.y > 179392 && tile.y < 180962 ||
+        //         tile.x > 289480 && tile.x < 291351 && tile.y > 179638 && tile.y < 181703
+        //             || tile.x > 288969 && tile.x < 290916 && tile.y > 179184 && tile.y < 180104
+        //     )
+        // {
+        //     Some(TileData::White)
         } else {
             let ds = pool.lock().unwrap().pop();
 
@@ -430,79 +440,4 @@ fn main() {
             });
         }
     });
-}
-
-fn compute_bbox(dataset: &Dataset) -> BBox {
-    let geo_transform = dataset.geo_transform().unwrap();
-
-    let min_x = geo_transform[0]; // Top-left x
-    let max_y = geo_transform[3]; // Top-left y
-    let pixel_width = geo_transform[1];
-    let pixel_height = geo_transform[5]; // Note: Typically negative for top-down
-
-    // Get dataset size
-    let raster_size = dataset.raster_size();
-
-    // Calculate max_x and min_y
-    let max_x = (raster_size.0 as f64).mul_add(pixel_width, min_x);
-    let min_y = (raster_size.1 as f64).mul_add(pixel_height, max_y);
-
-    BBox {
-        min_x,
-        max_x,
-        min_y,
-        max_y,
-    }
-}
-
-fn prepare_target(target_file: &Path, max_zoom: u8) -> Result<Connection, Error> {
-    if target_file.exists() {
-        panic!("target file exists");
-    }
-
-    let conn = Connection::open(target_file)?;
-
-    conn.pragma_update(None, "synchronous", "OFF")?;
-
-    conn.execute(
-        "CREATE TABLE metadata (
-            name TEXT NOT NULL,
-            value TEXT NOT NULL,
-            UNIQUE(name)
-        )",
-        (),
-    )?;
-
-    conn.execute(
-        "CREATE TABLE tiles (
-            zoom_level INTEGER NOT NULL,
-            tile_column INTEGER NOT NULL,
-            tile_row INTEGER NOT NULL,
-            tile_data BLOB NOT NULL,
-            PRIMARY KEY (zoom_level, tile_column, tile_row)
-        )",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('name', 'Snina');",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('format', 'jpeg');",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('minzoom', 0);",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('maxzoom', ?1);",
-        [max_zoom],
-    )?;
-
-    Ok(conn)
 }
