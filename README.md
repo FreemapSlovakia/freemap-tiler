@@ -43,7 +43,7 @@ Options:
 
 ## Serving
 
-Serve with `freemap-tileserver`.
+Serve with [`freemap-tileserver`](https://github.com/FreemapSlovakia/freemap-tileserver).
 
 ## Example
 
