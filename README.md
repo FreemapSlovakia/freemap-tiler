@@ -5,8 +5,10 @@ Uses Z-order curve to efficiently create lower-zoom tiles storing minimal tiles 
 
 ## Building and installing
 
+If necessary, first clone, compile and install latest GDAL locally and then use it with `GDAL_HOME=/usr/local` environment variable.
+
 ```sh
-cargo install --path .
+GDAL_HOME=/usr/local cargo install --path .
 ```
 
 ## Command options
@@ -39,68 +41,162 @@ Options:
           Print version
 ```
 
+## Serving
+
+Serve with `freemap-tileserver`.
+
 ## Example
 
 ```sh
 freemap-tiler \
-  --source-file /home/martin/14TB/ofmozaika/Ortofoto_2022_vychod_jtsk_rgb/orto2022_vychod_rgb/all.vrt \
-  --target-file /home/martin/OSM/vychod.mbtiles \
+  --source-file vychod-with-mask.vrt \
+  --target-file vychod.mbtiles \
   --max-zoom 19 \
   --source-srs EPSG:8353 \
   --jpeg-quality 90 \
   --transform-pipeline "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=hgridshift +grids=Slovakia_JTSK03_to_JTSK.gsb +step +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=485.021 +y=169.465 +z=483.839 +rx=-7.786342 +ry=-4.397554 +rz=-4.102655 +s=0 +convention=coordinate_frame +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84"
 ```
 
-## Creating composed mbtiles (imagery+alpha)
+## Cookbook
 
-Stred:
+### Slovakia
+
+1. download part of [Ortofotomozaia](https://www.geoportal.sk/sk/zbgis/ortofotomozaika/) you want to process from and extract it, for example _východ_ (`vychod`)
+1. build VRT:
+   ```sh
+   gdalbuildvrt -a_srs EPSG:8353 vychod.vrt vychod-extracted/*.tif
+   ```
+1. create a tile index file `gdaltindex tmp.gpkg vychod-extracted/*.tif && ogr2ogr -f GPKG -t_srs EPSG:8353 index.gpkg tmp.gpkg && rm tmp.gpkg`
+1. download `lms_datum_snimkovania_#.zip` where `#` is currently 2 or 3
+1. dissolve `lms_datum_snimkovania`:
+   ```sh
+   ogr2ogr \
+     -f GPKG \
+     sk-area.gpkg \
+     /vsizip/lms_datum_snimkovania_2.zip/lms_datum_snimkovania_2_cyklus.shp \
+     -nln dissolved \
+     -nlt POLYGON \
+     -dialect sqlite \
+     -sql "SELECT ST_Simplify(ST_MakePolygon(ST_ExteriorRing(ST_Buffer(ST_Union(geometry), 0.00001, 1))), 0.1) AS geometry FROM lms_datum_snimkovania_2_cyklus" \
+     -a_srs EPSG:8353
+   ```
+1. dissolve the tile index
+   ```sh
+   ogr2ogr \
+     -f GPKG \
+     vychod-tiles.gpkg \
+     index.gpkg \
+     -nln tiles \
+     -nlt POLYGON\
+     -dialect sqlite \
+     -sql "SELECT ST_Union(geom) AS geometry FROM 'index'" \
+     -a_srs EPSG:8353
+   ```
+1. create a vector mask
+   ```sh
+   ogr2ogr -f GPKG combined.gpkg sk-area.gpkg -nln dissolved
+   cp combined.gpkg vychod-mask.gpkg
+   ogr2ogr -f GPKG -update -append vychod-mask.gpkg vychod-tiles.gpkg -nln tiles
+   ogr2ogr -f GPKG intersection.gpkg vychod-mask.gpkg \
+     -dialect sqlite \
+     -sql "
+       SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
+       FROM tiles a, dissolved b
+       WHERE ST_Intersects(a.geometry, b.geometry)
+     " \
+     -nln intersection \
+     -nlt POLYGON \
+     -a_srs EPSG:8353
+   ```
+1. rasterize the mask
+   ```sh
+   gdal_rasterize \
+     -burn 0 \
+     -at -i \
+     -init 255 \
+     -tap \
+     $(gdalinfo -json vychod.vrt | jq -r '"-te \(.cornerCoordinates.upperLeft[0]) \(.cornerCoordinates.lowerRight[1]) \(.cornerCoordinates.lowerRight[0]) \(.cornerCoordinates.upperLeft[1]) -tr \(.geoTransform[1]) \(-.geoTransform[5])"') \
+     -ot Byte \
+     -of GTiff \
+     -co TILED=YES \
+     -co COMPRESS=DEFLATE \
+     -co BIGTIFF=YES \
+     vychod-mask.gpkg vychod-mask.tif
+   ```
+1. generate VRT of the mask
+   ```sh
+   gdalbuildvrt vychod-mask.vrt vychod-mask.tif
+   ```
+1. edit `vychod.vrt` and add `VRTRasterBand` from `vychod-mask.vrt` and save to `vychod-with-mask.vrt`; example:
+   ```xml
+     ...
+     <VRTRasterBand dataType="Byte" band="4">
+       <ColorInterp>Alpha</ColorInterp>
+       <SimpleSource>
+         <SourceFilename relativeToVRT="1">vychod-mask.tif</SourceFilename>
+         <SourceBand>1</SourceBand>
+         <SourceProperties RasterXSize="775000" RasterYSize="898014" DataType="Byte" BlockXSize="256" BlockYSize="256" />
+         <SrcRect xOff="0" yOff="0" xSize="775000" ySize="898014" />
+         <DstRect xOff="0" yOff="0" xSize="775000" ySize="898014" />
+       </SimpleSource>
+     </VRTRasterBand>
+   </VRTDataset>
+   <!-- end of file -->
+   ```
+
+### Czech republic
+
+TODO
 
 ```sh
-sqlite3 stred-with-mask.mbtiles
-```
+gdaltindex vychod-tileindex.gpkg -lyr_name index new/*.jpg
 
-```sql
-ATTACH 'stred.mbtiles' AS db1;
-ATTACH 'stred-mask.mbtiles' AS db2;
-CREATE TABLE tiles (
-    tile_data BLOB,
-    zoom_level INTEGER,
-    tile_column INTEGER,
-    tile_row INTEGER,
-    tile_alpha BLOB
-);
-INSERT INTO tiles (tile_data, zoom_level, tile_column, tile_row, tile_alpha)
-SELECT db1.tiles.tile_data, db1.tiles.zoom_level, db1.tiles.tile_column, db1.tiles.tile_row, db2.tiles.tile_data AS tile_alpha
-FROM db1.tiles
-JOIN db2.tiles
-ON (db1.tiles.zoom_level = db2.tiles.zoom_level AND db1.tiles.tile_column = db2.tiles.tile_column AND db1.tiles.tile_row = db2.tiles.tile_row);
-CREATE TABLE metadata AS SELECT * FROM db1.metadata;
-CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row);
-CREATE UNIQUE INDEX idx_metadata ON metadata (name);
-```
+ogr2ogr \
+  -f GPKG \
+  vychod-tileindex-dissolved.gpkg \
+  vychod-tileindex.gpkg \
+  -nln dissolved \
+  -nlt POLYGON \
+  -dialect sqlite \
+  -sql "SELECT ST_Union(geom) AS geometry FROM 'index'" \
+  -a_srs EPSG:5514
 
-Vychod:
+ogr2ogr \
+  -f GPKG \
+  result.gpkg \
+  admin.gpkg \
+  -nln tiles \
+  -nlt POLYGON \
+  -dialect sqlite \
+  -sql "SELECT ST_Buffer(geom, 99.5, 16) AS geometry FROM administrative_units" \
+  -a_srs EPSG:5514
 
-```sh
-sqlite3 vychod-with-mask.mbtiles
-```
+ogr2ogr -f GPKG -update -append result.gpkg vychod-tileindex-dissolved.gpkg -nln dissolved
 
-```sql
-ATTACH 'vychod.mbtiles' AS db1;
-ATTACH 'vychod-mask.mbtiles' AS db2;
-CREATE TABLE tiles (
-    tile_data BLOB,
-    zoom_level INTEGER,
-    tile_column INTEGER,
-    tile_row INTEGER,
-    tile_alpha BLOB
-);
-INSERT INTO tiles (tile_data, zoom_level, tile_column, tile_row, tile_alpha)
-SELECT db1.tiles.tile_data, db1.tiles.zoom_level, db1.tiles.tile_column, db1.tiles.tile_row, db2.tiles.tile_data AS tile_alpha
-FROM db1.tiles
-JOIN db2.tiles
-ON (db1.tiles.zoom_level = db2.tiles.zoom_level AND db1.tiles.tile_column = db2.tiles.tile_column AND db1.tiles.tile_row = db2.tiles.tile_row);
-CREATE TABLE metadata AS SELECT * FROM db1.metadata;
-CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row);
-CREATE UNIQUE INDEX idx_metadata ON metadata (name);
+ogr2ogr -f GPKG intersection.gpkg result.gpkg \
+  -dialect sqlite \
+  -sql "
+    SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
+    FROM tiles a, dissolved b
+    WHERE ST_Intersects(a.geometry, b.geometry)
+  " \
+  -nln intersection \
+  -nlt POLYGON \
+  -a_srs EPSG:5514
+
+gdalbuildvrt vychod.vrt new/*.jpg
+
+gdal_rasterize \
+  -burn 0 \
+  -at -i \
+  -init 255 \
+  -tap \
+  $(gdalinfo -json vychod.vrt | jq -r '"-te \(.cornerCoordinates.upperLeft[0]) \(.cornerCoordinates.lowerRight[1]) \(.cornerCoordinates.lowerRight[0]) \(.cornerCoordinates.upperLeft[1]) -tr \(.geoTransform[1]) \(-.geoTransform[5])"') \
+  -ot Byte \
+  -of GTiff \
+  -co TILED=YES \
+  -co COMPRESS=DEFLATE \
+  -co BIGTIFF=YES \
+  intersection.gpkg \
+  vychod-alpha-mask.tif
 ```
