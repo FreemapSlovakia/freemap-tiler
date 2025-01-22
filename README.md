@@ -50,3 +50,57 @@ freemap-tiler \
   --jpeg-quality 90 \
   --transform-pipeline "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=hgridshift +grids=Slovakia_JTSK03_to_JTSK.gsb +step +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=485.021 +y=169.465 +z=483.839 +rx=-7.786342 +ry=-4.397554 +rz=-4.102655 +s=0 +convention=coordinate_frame +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84"
 ```
+
+## Creating composed mbtiles (imagery+alpha)
+
+Stred:
+
+```sh
+sqlite3 stred-with-mask.mbtiles
+```
+
+```sql
+ATTACH 'stred.mbtiles' AS db1;
+ATTACH 'stred-mask.mbtiles' AS db2;
+CREATE TABLE tiles (
+    tile_data BLOB,
+    zoom_level INTEGER,
+    tile_column INTEGER,
+    tile_row INTEGER,
+    tile_alpha BLOB
+);
+INSERT INTO tiles (tile_data, zoom_level, tile_column, tile_row, tile_alpha)
+SELECT db1.tiles.tile_data, db1.tiles.zoom_level, db1.tiles.tile_column, db1.tiles.tile_row, db2.tiles.tile_data AS tile_alpha
+FROM db1.tiles
+JOIN db2.tiles
+ON (db1.tiles.zoom_level = db2.tiles.zoom_level AND db1.tiles.tile_column = db2.tiles.tile_column AND db1.tiles.tile_row = db2.tiles.tile_row);
+CREATE TABLE metadata AS SELECT * FROM db1.metadata;
+CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row);
+CREATE UNIQUE INDEX idx_metadata ON metadata (name);
+```
+
+Vychod:
+
+```sh
+sqlite3 vychod-with-mask.mbtiles
+```
+
+```sql
+ATTACH 'vychod.mbtiles' AS db1;
+ATTACH 'vychod-mask.mbtiles' AS db2;
+CREATE TABLE tiles (
+    tile_data BLOB,
+    zoom_level INTEGER,
+    tile_column INTEGER,
+    tile_row INTEGER,
+    tile_alpha BLOB
+);
+INSERT INTO tiles (tile_data, zoom_level, tile_column, tile_row, tile_alpha)
+SELECT db1.tiles.tile_data, db1.tiles.zoom_level, db1.tiles.tile_column, db1.tiles.tile_row, db2.tiles.tile_data AS tile_alpha
+FROM db1.tiles
+JOIN db2.tiles
+ON (db1.tiles.zoom_level = db2.tiles.zoom_level AND db1.tiles.tile_column = db2.tiles.tile_column AND db1.tiles.tile_row = db2.tiles.tile_row);
+CREATE TABLE metadata AS SELECT * FROM db1.metadata;
+CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row);
+CREATE UNIQUE INDEX idx_metadata ON metadata (name);
+```

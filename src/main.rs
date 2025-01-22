@@ -14,7 +14,7 @@ use gdal::{
     Dataset, DriverManager,
 };
 use geo::compute_bbox;
-use image::{imageops::FilterType, GrayImage, RgbImage};
+use image::{imageops::FilterType, RgbaImage};
 use rusqlite::Connection;
 use schema::create_schema;
 use std::{
@@ -73,7 +73,11 @@ fn main() {
 
     let band_count = source_ds.raster_count();
 
-    let is_mask = band_count == 1;
+    if band_count != 4 {
+        panic!("Expecting 4 bands");
+    }
+
+    // let is_mask = band_count == 1;
 
     let source_srs = source_srs.map_or_else(
         || source_ds.spatial_ref().expect("error geting SRS"),
@@ -102,6 +106,11 @@ fn main() {
         max_y: trans[3],
     }
     .compute_covered_tiles(max_zoom);
+
+    // let mut tiles: Vec<_> = tiles
+    //     .into_iter()
+    //     .filter(|t| t.x > 291887 && t.x < 291924 && t.y > 181279 && t.y < 181304)
+    //     .collect();
 
     Tile::sort_by_zorder(&mut tiles);
 
@@ -148,12 +157,7 @@ fn main() {
         pending_vec: tiles,
     }));
 
-    enum TileData {
-        White,
-        Edge(Vec<u8>),
-    }
-
-    let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, TileData>::new()));
+    let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
 
     let process_task = &move |tile: Tile, worker: &Worker<Tile>| {
         let counter = counter.fetch_add(1, Ordering::Relaxed);
@@ -183,8 +187,6 @@ fn main() {
 
             let mut has_data = false;
 
-            let mut is_white = is_mask;
-
             let children = tile.get_children();
 
             let mut buffer_cache = buffer_cache.lock().unwrap();
@@ -202,15 +204,6 @@ fn main() {
                 };
 
                 has_data = true;
-
-                let sector = match sector {
-                    TileData::Edge(sector) => {
-                        is_white = false;
-
-                        sector
-                    }
-                    TileData::White => vec![255; tile_size as usize * tile_size as usize],
-                };
 
                 let so_x = (i & 1) * tile_size as usize;
                 let so_y = (i >> 1) * tile_size as usize;
@@ -230,11 +223,9 @@ fn main() {
 
             if !has_data {
                 None
-            } else if is_white {
-                Some(TileData::White)
             } else {
-                Some(TileData::Edge(if is_mask {
-                    let img = GrayImage::from_vec(
+                Some({
+                    let img = RgbaImage::from_vec(
                         u32::from(tile_size) * 2,
                         u32::from(tile_size) * 2,
                         out_buffer,
@@ -248,31 +239,8 @@ fn main() {
                         FilterType::Lanczos3,
                     )
                     .into_raw()
-                } else {
-                    let img = RgbImage::from_vec(
-                        u32::from(tile_size) * 2,
-                        u32::from(tile_size) * 2,
-                        out_buffer,
-                    )
-                    .expect("Invalid image dimensions");
-
-                    image::imageops::resize(
-                        &img,
-                        u32::from(tile_size),
-                        u32::from(tile_size),
-                        FilterType::Lanczos3,
-                    )
-                    .into_raw()
-                }))
+                })
             }
-        // } else if is_mask
-        //     && (
-        //         // tile.x > 291469 && tile.x < 294182 && tile.y > 179392 && tile.y < 180962 ||
-        //         tile.x > 289480 && tile.x < 291351 && tile.y > 179638 && tile.y < 181703
-        //             || tile.x > 288969 && tile.x < 290916 && tile.y > 179184 && tile.y < 180104
-        //     )
-        // {
-        //     Some(TileData::White)
         } else {
             let ds = pool.lock().unwrap().pop();
 
@@ -320,9 +288,7 @@ fn main() {
 
             let mut out_buffer = vec![0u8; tile_size as usize * tile_size as usize * band_count];
 
-            let mut is_black = true;
-
-            let mut is_white = is_mask;
+            let mut no_data = true;
 
             for x in 0..tile_size as usize {
                 for y in 0..tile_size as usize {
@@ -331,24 +297,19 @@ fn main() {
                     for (i, buffer) in buffers.iter().enumerate() {
                         let b = buffer[(x, y)];
                         out_buffer[offset + i] = b;
-                        is_black = is_black && (b == 0);
-                        is_white = is_white && (b == 255);
+                        no_data = no_data && (b == 0);
                     }
                 }
             }
 
-            if is_black {
+            if no_data {
                 None
-            } else if is_white {
-                Some(TileData::White)
             } else {
-                Some(TileData::Edge(out_buffer))
+                Some(out_buffer)
             }
         };
 
         if let Some(tile_data) = res {
-            let mut vect = Vec::new();
-
             // produces bigger jpegs
             // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
             //     .write_image(
@@ -359,31 +320,42 @@ fn main() {
             //     )
             //     .expect("Failed to encode JPEG");
 
-            if let TileData::Edge(out_buffer) = &tile_data {
-                if is_mask {
-                    let mut encoder =
-                        zstd::Encoder::new(&mut vect, 0).expect("error creating zstd encoder");
+            let mut rgb = Vec::with_capacity(tile_data.len() / 4 * 3);
 
-                    encoder.write(out_buffer).expect("error zstd encoding");
+            let mut alpha = Vec::with_capacity(tile_data.len() / 4);
 
-                    encoder.finish().expect("error finishing zstd encoding");
-                } else {
-                    jpeg_encoder::Encoder::new(&mut vect, args.jpeg_quality)
-                        .encode(
-                            out_buffer,
-                            tile_size,
-                            tile_size,
-                            jpeg_encoder::ColorType::Rgb,
-                        )
-                        .expect("Failed to encode JPEG");
-                }
+            let mut is_full = true;
+
+            for chunk in tile_data.chunks_exact(4) {
+                rgb.extend_from_slice(&chunk[0..3]);
+
+                alpha.push(chunk[3]);
+
+                is_full = is_full && chunk[3] == 255;
             }
+
+            let mut alpha_vect = Vec::new();
+
+            if !is_full {
+                let mut encoder =
+                    zstd::Encoder::new(&mut alpha_vect, 0).expect("error creating zstd encoder");
+
+                encoder.write(&alpha).expect("error zstd encoding");
+
+                encoder.finish().expect("error finishing zstd encoding");
+            }
+
+            let mut rgb_vect = Vec::new();
+
+            jpeg_encoder::Encoder::new(&mut rgb_vect, args.jpeg_quality)
+                .encode(&rgb, tile_size, tile_size, jpeg_encoder::ColorType::Rgb)
+                .expect("Failed to encode JPEG");
 
             // println!("Inserting {tile}");
 
             if let Err(error) = conn.lock().unwrap().execute(
-                "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4)",
-                (tile.zoom, tile.x, (1 << tile.zoom) - 1 - tile.y, vect),
+                "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4, ?5)",
+                (tile.zoom, tile.x, tile.reversed_y(), rgb_vect, alpha_vect),
             ) {
                 panic!("Err: {tile} {error}");
             }

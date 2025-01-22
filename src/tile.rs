@@ -9,6 +9,10 @@ pub struct Tile {
 }
 
 impl Tile {
+    pub fn reversed_y(&self) -> u32 {
+        (1 << self.zoom) - 1 - self.y
+    }
+
     pub fn bounds_to_epsg3857(&self, tile_size: u16) -> BBox {
         let tile_size = f64::from(tile_size);
 

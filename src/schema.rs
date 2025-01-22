@@ -18,13 +18,14 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
           tile_column INTEGER NOT NULL,
           tile_row INTEGER NOT NULL,
           tile_data BLOB NOT NULL,
+          tile_alpha BLOB NOT NULL,
           PRIMARY KEY (zoom_level, tile_column, tile_row)
       )",
         (),
     )?;
 
     conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('name', 'Snina');",
+        "INSERT INTO metadata (name, value) VALUES ('name', 'Tiles');",
         (),
     )?;
 
