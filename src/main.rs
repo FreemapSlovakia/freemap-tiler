@@ -17,6 +17,7 @@ use geo::compute_bbox;
 use image::{imageops::FilterType, RgbaImage};
 use rusqlite::Connection;
 use schema::create_schema;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::Write,
@@ -34,6 +35,14 @@ struct Status {
     processed_set: HashSet<Tile>,
     waiting_set: HashSet<Tile>,
     pending_vec: Vec<Tile>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Limits {
+    pub min_x: u32,
+    pub max_x: u32,
+    pub min_y: u32,
+    pub max_y: u32,
 }
 
 fn main() {
@@ -66,6 +75,8 @@ fn main() {
     create_schema(&conn, 19).expect("error initializing schema");
 
     let conn = Arc::new(Mutex::new(conn));
+
+    let conn_clone = Arc::clone(&conn);
 
     let pool = Arc::new(Mutex::new(Vec::<Dataset>::new()));
 
@@ -158,6 +169,10 @@ fn main() {
     }));
 
     let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
+
+    let limits = Arc::new(Mutex::new(HashMap::new()));
+
+    let limits_clone = Arc::clone(&limits);
 
     let process_task = &move |tile: Tile, worker: &Worker<Tile>| {
         let counter = counter.fetch_add(1, Ordering::Relaxed);
@@ -353,6 +368,23 @@ fn main() {
 
             // println!("Inserting {tile}");
 
+            limits
+                .lock()
+                .unwrap()
+                .entry(tile.zoom)
+                .and_modify(|limits: &mut Limits| {
+                    limits.max_x = limits.max_x.max(tile.x);
+                    limits.min_x = limits.min_x.min(tile.x);
+                    limits.max_y = limits.max_y.max(tile.y);
+                    limits.min_y = limits.min_y.min(tile.y);
+                })
+                .or_insert_with(move || Limits {
+                    min_x: tile.x,
+                    max_x: tile.x,
+                    min_y: tile.y,
+                    max_y: tile.y,
+                });
+
             if let Err(error) = conn.lock().unwrap().execute(
                 "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4, ?5)",
                 (tile.zoom, tile.x, tile.reversed_y(), rgb_vect, alpha_vect),
@@ -412,4 +444,17 @@ fn main() {
             });
         }
     });
+
+    let limits = Arc::try_unwrap(limits_clone).unwrap().into_inner().unwrap();
+
+    let limits = serde_json::to_string(&limits).expect("error serializing limits");
+
+    conn_clone
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO metadata (name, value) VALUES ('limits', ?1)",
+            [limits],
+        )
+        .expect("error inserting limits");
 }
