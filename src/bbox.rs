@@ -1,4 +1,5 @@
 use crate::{geo::WEB_MERCATOR_EXTENT, tile::Tile};
+use geo::Polygon;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BBox {
@@ -28,5 +29,18 @@ impl BBox {
         }
 
         tiles
+    }
+
+    pub fn to_polygon(&self) -> Polygon<f64> {
+        Polygon::new(
+            geo::LineString::from(vec![
+                (self.min_x, self.min_y),
+                (self.max_x, self.min_y),
+                (self.max_x, self.max_y),
+                (self.min_x, self.max_y),
+                (self.min_x, self.min_y),
+            ]),
+            vec![],
+        )
     }
 }

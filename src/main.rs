@@ -1,6 +1,7 @@
 mod args;
 mod bbox;
 mod geo;
+mod geojson;
 mod schema;
 mod tile;
 mod warp;
