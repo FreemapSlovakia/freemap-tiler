@@ -2,62 +2,99 @@ use gdal::Dataset;
 use gdal_sys::{
     CPLErr, GDALChunkAndWarpImage, GDALCreateGenImgProjTransformer2, GDALCreateWarpOperation,
     GDALCreateWarpOptions, GDALDestroyGenImgProjTransformer, GDALDestroyWarpOperation,
-    GDALDestroyWarpOptions, GDALGenImgProjTransform, GDALResampleAlg,
+    GDALDestroyWarpOptions, GDALGenImgProjTransform, GDALReprojectImage, GDALResampleAlg,
     GDALWarpInitDefaultBandMapping,
 };
-use std::{ffi::CString, ptr};
+use std::{
+    ffi::{c_char, CString},
+    ptr,
+};
 
-pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, pipeline: Option<&str>) {
+pub enum Transform<'a> {
+    Pipeline(&'a str),
+    Srs(*const c_char, *const c_char),
+}
+
+pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, transform: Transform) {
     unsafe {
         let warp_options = GDALCreateWarpOptions();
 
-        if let Some(pipeline) = pipeline {
-            let option = CString::new(format!("COORDINATE_OPERATION={pipeline}")).unwrap();
-
-            let option = option.into_raw();
-
-            let mut options: Vec<*mut i8> = vec![option, ptr::null_mut()];
-
-            let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
-                source_ds.c_dataset(),
-                target_ds.c_dataset(),
-                options.as_mut_ptr(),
-            );
-
-            assert!(
-                !gen_img_proj_transformer.is_null(),
-                "Failed to create image projection transformer"
-            );
-
-            (*warp_options).pTransformerArg = gen_img_proj_transformer;
-
-            (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
-
-            drop(CString::from_raw(option));
-        }
-
         (*warp_options).eResampleAlg = GDALResampleAlg::GRA_Lanczos;
 
-        (*warp_options).hSrcDS = source_ds.c_dataset();
+        let result = match transform {
+            Transform::Pipeline(pipeline) => {
+                let mut options: Vec<*mut i8> = vec![];
 
-        (*warp_options).hDstDS = target_ds.c_dataset();
+                options.push(
+                    CString::new(format!("COORDINATE_OPERATION={pipeline}"))
+                        .unwrap()
+                        .into_raw(),
+                );
 
-        (*warp_options).nDstAlphaBand = 0;
+                options.push(ptr::null_mut());
 
-        (*warp_options).nSrcAlphaBand = 0;
+                let gen_img_proj_transformer = GDALCreateGenImgProjTransformer2(
+                    source_ds.c_dataset(),
+                    target_ds.c_dataset(),
+                    options.as_mut_ptr(),
+                );
 
-        GDALWarpInitDefaultBandMapping(warp_options, source_ds.raster_count() as i32);
+                drop(CString::from_raw(*options.get(0).unwrap()));
 
-        let warp_operation = GDALCreateWarpOperation(warp_options);
+                assert!(
+                    !gen_img_proj_transformer.is_null(),
+                    "Failed to create image projection transformer"
+                );
 
-        let result =
-            GDALChunkAndWarpImage(warp_operation, 0, 0, tile_size.into(), tile_size.into());
+                (*warp_options).pTransformerArg = gen_img_proj_transformer;
 
-        if !(*warp_options).pTransformerArg.is_null() {
-            GDALDestroyGenImgProjTransformer((*warp_options).pTransformerArg);
-        }
+                (*warp_options).pfnTransformer = Some(GDALGenImgProjTransform);
 
-        GDALDestroyWarpOperation(warp_operation);
+                (*warp_options).hSrcDS = source_ds.c_dataset();
+
+                (*warp_options).hDstDS = target_ds.c_dataset();
+
+                (*warp_options).nDstAlphaBand = 0;
+
+                (*warp_options).nSrcAlphaBand = 0;
+
+                GDALWarpInitDefaultBandMapping(warp_options, source_ds.raster_count() as i32);
+
+                let warp_operation = GDALCreateWarpOperation(warp_options);
+
+                assert!(
+                    !warp_operation.is_null(),
+                    "Failed to create GDALCreateWarpOperation"
+                );
+
+                let result =
+                    GDALChunkAndWarpImage(warp_operation, 0, 0, tile_size.into(), tile_size.into());
+
+                if !(*warp_options).pTransformerArg.is_null() {
+                    GDALDestroyGenImgProjTransformer((*warp_options).pTransformerArg);
+                }
+
+                GDALDestroyWarpOperation(warp_operation);
+
+                result
+            }
+            Transform::Srs(source_wkt, target_wkt) => {
+                let result = GDALReprojectImage(
+                    source_ds.c_dataset(),
+                    source_wkt,
+                    target_ds.c_dataset(),
+                    target_wkt,
+                    GDALResampleAlg::GRA_Lanczos,
+                    0.0,
+                    0.0,
+                    None,
+                    ptr::null_mut(),
+                    warp_options,
+                );
+
+                result
+            }
+        };
 
         GDALDestroyWarpOptions(warp_options);
 

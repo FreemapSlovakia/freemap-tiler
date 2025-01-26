@@ -3,9 +3,10 @@ use geojson::GeoJson;
 use proj::{Proj, Transform};
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 
 // Read GeoJSON and parse into a Polygon
-fn parse_geojson_polygon(file_path: &str) -> Result<Polygon<f64>, String> {
+pub fn parse_geojson_polygon(file_path: &Path) -> Result<Polygon<f64>, String> {
     let mut file = File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
 
     let mut geojson_str = String::new();
@@ -51,18 +52,4 @@ pub fn reproject_polygon(polygon: &mut Polygon<f64>) -> Result<(), String> {
         .map_err(|e| format!("Reprojection failed: {}", e))?;
 
     Ok(())
-}
-
-fn main() {
-    // Example GeoJSON file path
-    let geojson_path = "polygon.geojson";
-
-    // Parse GeoJSON polygon
-    let polygon = match parse_geojson_polygon(geojson_path) {
-        Ok(polygon) => polygon,
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            return;
-        }
-    };
 }

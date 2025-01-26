@@ -6,8 +6,9 @@ mod schema;
 mod tile;
 mod warp;
 
+use ::geo::Intersects;
 use args::Args;
-use bbox::BBox;
+use bbox::{covered_tiles, BBox};
 use clap::Parser;
 use crossbeam_deque::{Steal, Stealer, Worker};
 use gdal::{
@@ -15,12 +16,14 @@ use gdal::{
     Dataset, DriverManager,
 };
 use geo::compute_bbox;
+use geojson::{parse_geojson_polygon, reproject_polygon};
 use image::{imageops::FilterType, RgbaImage};
 use rusqlite::Connection;
 use schema::create_schema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    ffi::CString,
     io::Write,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -30,6 +33,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tile::Tile;
+use warp::Transform;
 
 struct Status {
     pending_set: HashSet<Tile>,
@@ -71,6 +75,18 @@ fn main() {
         panic!("target file exists");
     }
 
+    let mut bounding_polygon = args
+        .bounding_polygon
+        .map(|path| parse_geojson_polygon(&path))
+        .transpose()
+        .expect("error reading geojson");
+
+    bounding_polygon
+        .as_mut()
+        .map(|mut polygon| reproject_polygon(&mut polygon))
+        .transpose()
+        .expect("error reprojecting polygon");
+
     let conn = Connection::open(target_file).expect("error creating output");
 
     create_schema(&conn, 19).expect("error initializing schema");
@@ -89,14 +105,18 @@ fn main() {
         panic!("Expecting 4 bands");
     }
 
-    // let is_mask = band_count == 1;
-
     let source_srs = source_srs.map_or_else(
         || source_ds.spatial_ref().expect("error geting SRS"),
         |source_srs| SpatialRef::from_definition(source_srs).expect("invalid spatial reference"),
     );
 
     let target_srs = SpatialRef::from_epsg(3857).expect("invalid epsg");
+
+    let source_wkt = CString::new(source_srs.to_wkt().expect("error producing WKT"))
+        .expect("CString::new failed");
+
+    let target_wkt = CString::new(target_srs.to_wkt().expect("error producing WKT"))
+        .expect("CString::new failed");
 
     let bbox = compute_bbox(&source_ds);
 
@@ -111,18 +131,27 @@ fn main() {
         .transform_bounds(&[bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y], 21)
         .expect("error transforming bounds");
 
-    let mut tiles = BBox {
-        min_x: trans[0],
-        max_x: trans[2],
-        min_y: trans[1],
-        max_y: trans[3],
-    }
-    .compute_covered_tiles(max_zoom);
+    let bounding_polygon = bounding_polygon.as_ref();
 
-    // let mut tiles: Vec<_> = tiles
-    //     .into_iter()
-    //     .filter(|t| t.x > 291887 && t.x < 291924 && t.y > 181279 && t.y < 181304)
-    //     .collect();
+    let mut tiles: Vec<_> = covered_tiles(
+        &BBox {
+            min_x: trans[0],
+            max_x: trans[2],
+            min_y: trans[1],
+            max_y: trans[3],
+        },
+        max_zoom,
+    )
+    .filter(|tile| {
+        bounding_polygon
+            .map(|bounding_polygon| {
+                tile.bounds_to_epsg3857(tile_size)
+                    .to_polygon()
+                    .intersects(bounding_polygon)
+            })
+            .unwrap_or(true)
+    })
+    .collect();
 
     Tile::sort_by_zorder(&mut tiles);
 
@@ -171,7 +200,7 @@ fn main() {
 
     let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
 
-    let limits = Arc::new(Mutex::new(HashMap::new()));
+    let limits = Arc::new(Mutex::new(HashMap::<u8, Limits>::new()));
 
     let limits_clone = Arc::clone(&limits);
 
@@ -283,7 +312,16 @@ fn main() {
                 ])
                 .expect("error setting geo transform");
 
-            warp::warp(&source_ds, &target_ds, tile_size, pipeline);
+            warp::warp(
+                &source_ds,
+                &target_ds,
+                tile_size,
+                if let Some(pipeline) = pipeline {
+                    Transform::Pipeline(pipeline)
+                } else {
+                    Transform::Srs(source_wkt.as_ptr(), target_wkt.as_ptr())
+                },
+            );
 
             pool.lock().unwrap().push(source_ds);
 
@@ -446,9 +484,9 @@ fn main() {
         }
     });
 
-    let limits = Arc::try_unwrap(limits_clone).unwrap().into_inner().unwrap();
+    let limits = limits_clone.lock().unwrap();
 
-    let limits = serde_json::to_string(&limits).expect("error serializing limits");
+    let limits = serde_json::to_string(&*limits).expect("error serializing limits");
 
     conn_clone
         .lock()
