@@ -18,6 +18,7 @@ use gdal::{
 use geo::compute_bbox;
 use geojson::{parse_geojson_polygon, reproject_polygon};
 use image::{imageops::FilterType, RgbaImage};
+use rayon::iter::{ParallelBridge, ParallelIterator};
 use rusqlite::Connection;
 use schema::create_schema;
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,8 @@ fn main() {
 
     let bounding_polygon = bounding_polygon.as_ref();
 
+    println!("Computilg tile coverage");
+
     let mut tiles: Vec<_> = covered_tiles(
         &BBox {
             min_x: trans[0],
@@ -142,6 +145,7 @@ fn main() {
         },
         max_zoom,
     )
+    .par_bridge()
     .filter(|tile| {
         bounding_polygon
             .map(|bounding_polygon| {
@@ -153,7 +157,11 @@ fn main() {
     })
     .collect();
 
+    println!("Sorting tiles");
+
     Tile::sort_by_zorder(&mut tiles);
+
+    println!("Preparing queues");
 
     let workers: Vec<Worker<_>> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
 
@@ -407,6 +415,8 @@ fn main() {
 
             // println!("Inserting {tile}");
 
+            let y = tile.reversed_y();
+
             limits
                 .lock()
                 .unwrap()
@@ -414,14 +424,14 @@ fn main() {
                 .and_modify(|limits: &mut Limits| {
                     limits.max_x = limits.max_x.max(tile.x);
                     limits.min_x = limits.min_x.min(tile.x);
-                    limits.max_y = limits.max_y.max(tile.y);
-                    limits.min_y = limits.min_y.min(tile.y);
+                    limits.max_y = limits.max_y.max(y);
+                    limits.min_y = limits.min_y.min(y);
                 })
                 .or_insert_with(move || Limits {
                     min_x: tile.x,
                     max_x: tile.x,
-                    min_y: tile.y,
-                    max_y: tile.y,
+                    min_y: y,
+                    max_y: y,
                 });
 
             if let Err(error) = conn.lock().unwrap().execute(
@@ -458,6 +468,8 @@ fn main() {
             worker.push(tile);
         }
     };
+
+    println!("Generating tiles");
 
     thread::scope(|scope| {
         for worker in workers {
