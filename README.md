@@ -61,7 +61,7 @@ freemap-tiler \
 
 ### Slovakia
 
-1. download part of [Ortofotomozaia](https://www.geoportal.sk/sk/zbgis/ortofotomozaika/) you want to process from and extract it, for example _východ_ (`vychod`)
+1. download part of [Ortofotomozaika SR](https://www.geoportal.sk/sk/zbgis/ortofotomozaika/) you want to process from and extract it, for example _východ_ (`vychod`)
 1. build VRT:
    ```sh
    gdalbuildvrt -a_srs EPSG:8353 vychod.vrt vychod-extracted/*.tif
