@@ -26,6 +26,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::CString,
     io::Write,
+    process::ExitCode,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -51,7 +52,17 @@ struct Limits {
     pub max_y: u32,
 }
 
-fn main() {
+fn main() -> ExitCode {
+    if let Err(e) = try_main() {
+        eprintln!("{e}");
+
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let max_zoom = args.max_zoom;
@@ -73,24 +84,24 @@ fn main() {
     });
 
     if target_file.exists() {
-        panic!("target file exists");
+        return Err("Target file exists".into());
     }
 
     let mut bounding_polygon = args
         .bounding_polygon
         .map(|path| parse_geojson_polygon(&path))
         .transpose()
-        .expect("error reading geojson");
+        .map_err(|e| format!("Error reading GeoJSON: {e}"))?;
 
     bounding_polygon
         .as_mut()
         .map(|mut polygon| reproject_polygon(&mut polygon))
         .transpose()
-        .expect("error reprojecting polygon");
+        .map_err(|e| format!("Error reprojecting polygon: {e}"))?;
 
-    let conn = Connection::open(target_file).expect("error creating output");
+    let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
 
-    create_schema(&conn, 19).expect("error initializing schema");
+    create_schema(&conn, 19).map_err(|e| format!("Error initializing schema: {e}"))?;
 
     let conn = Arc::new(Mutex::new(conn));
 
@@ -103,34 +114,39 @@ fn main() {
     let band_count = source_ds.raster_count();
 
     if band_count != 4 {
-        panic!("Expecting 4 bands");
+        return Err("Expecting 4 bands".into());
     }
 
     let source_srs = source_srs.map_or_else(
-        || source_ds.spatial_ref().expect("error geting SRS"),
-        |source_srs| SpatialRef::from_definition(source_srs).expect("invalid spatial reference"),
-    );
+        || {
+            source_ds
+                .spatial_ref()
+                .map_err(|e| format!("Error geting SRS: {e}"))
+        },
+        |source_srs| {
+            SpatialRef::from_definition(source_srs)
+                .map_err(|e| format!("Invalid spatial reference: {e}"))
+        },
+    )?;
 
-    let target_srs = SpatialRef::from_epsg(3857).expect("invalid epsg");
+    let target_srs = SpatialRef::from_epsg(3857)?;
 
-    let source_wkt = CString::new(source_srs.to_wkt().expect("error producing WKT"))
-        .expect("CString::new failed");
+    let source_wkt = CString::new(source_srs.to_wkt()?)?;
 
-    let target_wkt = CString::new(target_srs.to_wkt().expect("error producing WKT"))
-        .expect("CString::new failed");
+    let target_wkt = CString::new(target_srs.to_wkt()?)?;
 
     let bbox = compute_bbox(&source_ds);
 
-    let mut options = CoordTransformOptions::new().unwrap();
+    let mut options = CoordTransformOptions::new()?;
 
     if let Some(pipeline) = pipeline {
-        options.set_coordinate_operation(pipeline, false).unwrap();
+        options.set_coordinate_operation(pipeline, false)?;
     }
 
     let trans = CoordTransform::new_with_options(&source_srs, &target_srs, &options)
-        .expect("Failed to create coordinate transform")
+        .map_err(|e| format!("Failed to create coordinate transform: {e}"))?
         .transform_bounds(&[bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y], 21)
-        .expect("error transforming bounds");
+        .map_err(|e| format!("Error transforming bounds: {e}"))?;
 
     let bounding_polygon = bounding_polygon.as_ref();
 
@@ -498,7 +514,7 @@ fn main() {
 
     let limits = limits_clone.lock().unwrap();
 
-    let limits = serde_json::to_string(&*limits).expect("error serializing limits");
+    let limits = serde_json::to_string(&*limits).expect("Error serializing limits");
 
     conn_clone
         .lock()
@@ -507,5 +523,7 @@ fn main() {
             "INSERT INTO metadata (name, value) VALUES ('limits', ?1)",
             [limits],
         )
-        .expect("error inserting limits");
+        .map_err(|e| format!("Error inserting limits: {e}"))?;
+
+    Ok(())
 }
