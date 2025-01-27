@@ -1,6 +1,6 @@
 # Freemap Tiler
 
-Tool to create MBTiles from raster geodata with a full pyramid overview from zoom 0.
+Tool to create MBTiles from raster geodata with a full pyramid overview from to 0.
 Uses Z-order curve to efficiently create lower-zoom tiles storing minimal tiles in RAM.
 
 Source can be any raster GDAL source containing 4 bands - Red, Green, Blue, Alpha.
