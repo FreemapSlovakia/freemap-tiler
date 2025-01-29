@@ -39,4 +39,12 @@ pub struct Args {
     /// JPEG quality
     #[arg(long, default_value_t = 85)]
     pub jpeg_quality: u8,
+
+    /// Resume
+    #[arg(long, default_value_t = false)]
+    pub resume: bool,
+
+    /// Debug
+    #[arg(long, default_value_t = false)]
+    pub debug: bool,
 }

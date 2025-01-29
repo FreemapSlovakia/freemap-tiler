@@ -2,6 +2,7 @@ use rusqlite::{Connection, Error};
 
 pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
     conn.pragma_update(None, "synchronous", "OFF")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
 
     conn.execute(
         "CREATE TABLE metadata (
@@ -19,8 +20,8 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
           tile_row INTEGER NOT NULL,
           tile_data BLOB NOT NULL,
           tile_alpha BLOB NOT NULL,
-          PRIMARY KEY (zoom_level, tile_column, tile_row)
-      )",
+          -- PRIMARY KEY (zoom_level, tile_column, tile_row)
+        )",
         (),
     )?;
 

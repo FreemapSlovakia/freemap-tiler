@@ -5,17 +5,14 @@ use gdal_sys::{
     GDALDestroyWarpOptions, GDALGenImgProjTransform, GDALReprojectImage, GDALResampleAlg,
     GDALWarpInitDefaultBandMapping,
 };
-use std::{
-    ffi::{c_char, CString},
-    ptr,
-};
+use std::{ffi::CString, ptr};
 
-pub enum Transform<'a> {
-    Pipeline(&'a str),
-    Srs(*const c_char, *const c_char),
+pub enum Transform {
+    Pipeline(String),
+    Srs(String, String),
 }
 
-pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, transform: Transform) {
+pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, transform: &Transform) {
     unsafe {
         let warp_options = GDALCreateWarpOptions();
 
@@ -81,9 +78,9 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, transform:
             Transform::Srs(source_wkt, target_wkt) => {
                 let result = GDALReprojectImage(
                     source_ds.c_dataset(),
-                    source_wkt,
+                    source_wkt.as_ptr() as *const i8,
                     target_ds.c_dataset(),
-                    target_wkt,
+                    target_wkt.as_ptr() as *const i8,
                     GDALResampleAlg::GRA_Lanczos,
                     0.0,
                     0.0,

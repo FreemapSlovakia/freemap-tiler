@@ -2,8 +2,10 @@ mod args;
 mod bbox;
 mod geo;
 mod geojson;
+mod processor;
 mod schema;
 mod tile;
+mod time_track;
 mod warp;
 
 use ::geo::Intersects;
@@ -13,28 +15,24 @@ use clap::Parser;
 use crossbeam_deque::{Steal, Stealer, Worker};
 use gdal::{
     spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
-    Dataset, DriverManager,
+    Dataset,
 };
 use geo::compute_bbox;
 use geojson::{parse_geojson_polygon, reproject_polygon};
-use image::{imageops::FilterType, RgbaImage};
+use processor::Processor;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use rusqlite::Connection;
 use schema::create_schema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    ffi::CString,
-    io::Write,
     process::ExitCode,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{mpsc::sync_channel, Arc, Mutex},
     thread::{self, available_parallelism},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tile::Tile;
+use time_track::{Metric, StatsCollector};
 use warp::Transform;
 
 struct Status {
@@ -52,6 +50,11 @@ struct Limits {
     pub max_y: u32,
 }
 
+enum StatsMsg {
+    Duration(Metric, Duration),
+    Stats(f32, usize, Tile),
+}
+
 fn main() -> ExitCode {
     if let Err(e) = try_main() {
         eprintln!("{e}");
@@ -65,17 +68,19 @@ fn main() -> ExitCode {
 fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let max_zoom = args.max_zoom;
-
-    let source_file = args.source_file.as_path();
-
     let target_file = args.target_file.as_path();
 
-    let source_srs = args.source_srs.as_deref();
+    {
+        let target_exists = target_file.exists();
 
-    let pipeline = args.transform_pipeline.as_deref();
+        if target_exists && !args.resume {
+            return Err("Target file exists".into());
+        }
 
-    let tile_size = args.tile_size;
+        if !target_exists && args.resume {
+            return Err("Can't resume - target doesn't exist".into());
+        }
+    }
 
     let num_threads = args.num_threads.unwrap_or_else(|| {
         available_parallelism()
@@ -83,8 +88,12 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             .get() as u16
     });
 
-    if target_file.exists() {
-        return Err("Target file exists".into());
+    let source_ds = Dataset::open(&args.source_file).expect("Error opening source");
+
+    let band_count = source_ds.raster_count();
+
+    if band_count != 4 {
+        return Err("Expecting 4 bands".into());
     }
 
     let mut bounding_polygon = args
@@ -99,25 +108,14 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()
         .map_err(|e| format!("Error reprojecting polygon: {e}"))?;
 
-    let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
+    if !args.resume {
+        let conn =
+            Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
 
-    create_schema(&conn, 19).map_err(|e| format!("Error initializing schema: {e}"))?;
-
-    let conn = Arc::new(Mutex::new(conn));
-
-    let conn_clone = Arc::clone(&conn);
-
-    let pool = Arc::new(Mutex::new(Vec::<Dataset>::new()));
-
-    let source_ds = Dataset::open(source_file).expect("Error opening source");
-
-    let band_count = source_ds.raster_count();
-
-    if band_count != 4 {
-        return Err("Expecting 4 bands".into());
+        create_schema(&conn, 19).map_err(|e| format!("Error initializing schema: {e}"))?;
     }
 
-    let source_srs = source_srs.map_or_else(
+    let source_srs = args.source_srs.as_deref().map_or_else(
         || {
             source_ds
                 .spatial_ref()
@@ -131,17 +129,17 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_srs = SpatialRef::from_epsg(3857)?;
 
-    let source_wkt = CString::new(source_srs.to_wkt()?)?;
-
-    let target_wkt = CString::new(target_srs.to_wkt()?)?;
-
     let bbox = compute_bbox(&source_ds);
 
     let mut options = CoordTransformOptions::new()?;
 
-    if let Some(pipeline) = pipeline {
+    let transform = if let Some(ref pipeline) = args.transform_pipeline {
         options.set_coordinate_operation(pipeline, false)?;
-    }
+
+        Transform::Pipeline(pipeline.to_string())
+    } else {
+        Transform::Srs(source_srs.to_wkt()?, target_srs.to_wkt()?)
+    };
 
     let trans = CoordTransform::new_with_options(&source_srs, &target_srs, &options)
         .map_err(|e| format!("Failed to create coordinate transform: {e}"))?
@@ -150,7 +148,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bounding_polygon = bounding_polygon.as_ref();
 
-    println!("Computilg tile coverage");
+    println!("Computing tile coverage");
 
     let mut tiles: Vec<_> = covered_tiles(
         &BBox {
@@ -159,13 +157,13 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             min_y: trans[1],
             max_y: trans[3],
         },
-        max_zoom,
+        args.max_zoom,
     )
     .par_bridge()
     .filter(|tile| {
         bounding_polygon
             .map(|bounding_polygon| {
-                tile.bounds_to_epsg3857(tile_size)
+                tile.bounds_to_epsg3857(args.tile_size)
                     .to_polygon()
                     .intersects(bounding_polygon)
             })
@@ -179,7 +177,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Preparing queues");
 
-    let workers: Vec<Worker<_>> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
+    let workers: Vec<_> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
 
     let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
 
@@ -212,8 +210,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let total = pending_set.len();
-    let counter = AtomicUsize::new(0);
-    let lg_ts = AtomicUsize::new(0);
 
     let status = Arc::new(Mutex::new(Status {
         pending_set,
@@ -222,268 +218,57 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         pending_vec: tiles,
     }));
 
-    let buffer_cache = Arc::new(Mutex::new(HashMap::<Tile, Vec<u8>>::new()));
-
     let limits = Arc::new(Mutex::new(HashMap::<u8, Limits>::new()));
 
     let limits_clone = Arc::clone(&limits);
 
-    let process_task = &move |tile: Tile, worker: &Worker<Tile>| {
-        let counter = counter.fetch_add(1, Ordering::Relaxed);
+    let stats_collector = StatsCollector::new(args.debug);
 
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    let tx = stats_collector.tx;
 
-        let old = lg_ts.load(Ordering::Relaxed);
+    let tx_clone = tx.clone();
 
-        if secs as usize != old
-            && lg_ts
-                .compare_exchange(old, secs as usize, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            println!(
-                "{:.2} % | {}",
-                counter as f32 / total as f32 * 100.0,
-                buffer_cache.lock().unwrap().len()
-            );
+    let (data_tx, data_rx) = sync_channel::<(Tile, Vec<u8>, Vec<u8>)>(num_threads as usize * 16);
+
+    let insert_conn = Connection::open(target_file).unwrap();
+
+    let insert_thread = thread::spawn(move || {
+        let instant = Instant::now();
+
+        let mut stmt = insert_conn
+            .prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data, tile_alpha) VALUES (?1, ?2, ?3, ?4, ?5)")
+            .unwrap();
+
+        for msg in data_rx {
+            stmt.execute((msg.0.zoom, msg.0.x, msg.0.reversed_y(), msg.1, msg.2))
+                .unwrap();
+
+            tx_clone
+                .send(StatsMsg::Duration(
+                    Metric::Insert,
+                    Instant::now().duration_since(instant),
+                ))
+                .unwrap();
         }
+    });
 
-        let res = if tile.zoom < max_zoom {
-            let mut out_buffer =
-                vec![0u8; tile_size as usize * tile_size as usize * band_count * 4];
+    let processor = Processor::new(
+        args.resume,
+        args.tile_size,
+        args.max_zoom,
+        total,
+        target_file,
+        tx,
+        args.debug,
+        &args.source_file,
+        status,
+        transform,
+        args.jpeg_quality,
+        limits,
+        data_tx,
+    );
 
-            let mut has_data = false;
-
-            let children = tile.get_children();
-
-            let mut buffer_cache = buffer_cache.lock().unwrap();
-
-            let sectors: Vec<_> = children
-                .iter()
-                .map(|tile| buffer_cache.remove(tile))
-                .collect();
-
-            drop(buffer_cache); // just for sure
-
-            for (i, sector) in sectors.into_iter().enumerate() {
-                let Some(sector) = sector else {
-                    continue;
-                };
-
-                has_data = true;
-
-                let so_x = (i & 1) * tile_size as usize;
-                let so_y = (i >> 1) * tile_size as usize;
-
-                for x in 0..tile_size as usize {
-                    for y in 0..tile_size as usize {
-                        let offset1 =
-                            ((x + so_x) + (y + so_y) * tile_size as usize * 2) * band_count;
-
-                        let offset2 = (x + y * tile_size as usize) * band_count;
-
-                        out_buffer[offset1..(band_count + offset1)]
-                            .copy_from_slice(&sector[offset2..(band_count + offset2)]);
-                    }
-                }
-            }
-
-            if !has_data {
-                None
-            } else {
-                Some({
-                    let img = RgbaImage::from_vec(
-                        u32::from(tile_size) * 2,
-                        u32::from(tile_size) * 2,
-                        out_buffer,
-                    )
-                    .expect("Invalid image dimensions");
-
-                    image::imageops::resize(
-                        &img,
-                        u32::from(tile_size),
-                        u32::from(tile_size),
-                        FilterType::Lanczos3,
-                    )
-                    .into_raw()
-                })
-            }
-        } else {
-            let ds = pool.lock().unwrap().pop();
-
-            let source_ds = ds.map_or_else(
-                || Dataset::open(source_file).expect("Error opening source"),
-                |ds| ds,
-            );
-
-            let bbox = tile.bounds_to_epsg3857(tile_size);
-
-            let mut target_ds = DriverManager::get_driver_by_name("MEM")
-                .expect("Failed to get MEM driver")
-                .create("", tile_size as usize, tile_size as usize, band_count)
-                .expect("Failed to create target dataset");
-
-            target_ds
-                .set_geo_transform(&[
-                    bbox.min_x,                                          // Top-left x
-                    (bbox.max_x - bbox.min_x) / f64::from(tile_size),    // Pixel width
-                    0.0,                                                 // Rotation (x-axis)
-                    bbox.max_y,                                          // Top-left y
-                    0.0,                                                 // Rotation (y-axis)
-                    -((bbox.max_y - bbox.min_y) / f64::from(tile_size)), // Pixel height (negative for top-down)
-                ])
-                .expect("error setting geo transform");
-
-            warp::warp(
-                &source_ds,
-                &target_ds,
-                tile_size,
-                if let Some(pipeline) = pipeline {
-                    Transform::Pipeline(pipeline)
-                } else {
-                    Transform::Srs(source_wkt.as_ptr(), target_wkt.as_ptr())
-                },
-            );
-
-            pool.lock().unwrap().push(source_ds);
-
-            let buffers: Vec<_> = (1..=band_count)
-                .map(|band| {
-                    target_ds
-                        .rasterband(band)
-                        .expect("error getting raster band")
-                        .read_as::<u8>(
-                            (0, 0),
-                            (tile_size as usize, tile_size as usize),
-                            (tile_size as usize, tile_size as usize),
-                            None,
-                        )
-                        .expect("error reading from band")
-                })
-                .collect();
-
-            let mut out_buffer = vec![0u8; tile_size as usize * tile_size as usize * band_count];
-
-            let mut no_data = true;
-
-            for x in 0..tile_size as usize {
-                for y in 0..tile_size as usize {
-                    let offset = (y + x * tile_size as usize) * band_count;
-
-                    for (i, buffer) in buffers.iter().enumerate() {
-                        let b = buffer[(x, y)];
-                        out_buffer[offset + i] = b;
-                        no_data = no_data && (b == 0);
-                    }
-                }
-            }
-
-            if no_data {
-                None
-            } else {
-                Some(out_buffer)
-            }
-        };
-
-        if let Some(tile_data) = res {
-            // produces bigger jpegs
-            // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
-            //     .write_image(
-            //         &out_buffer,
-            //         tile_size as u32,
-            //         tile_size as u32,
-            //         image::ExtendedColorType::Rgb8,
-            //     )
-            //     .expect("Failed to encode JPEG");
-
-            let mut rgb = Vec::with_capacity(tile_data.len() / 4 * 3);
-
-            let mut alpha = Vec::with_capacity(tile_data.len() / 4);
-
-            let mut is_full = true;
-
-            for chunk in tile_data.chunks_exact(4) {
-                rgb.extend_from_slice(&chunk[0..3]);
-
-                alpha.push(chunk[3]);
-
-                is_full = is_full && chunk[3] == 255;
-            }
-
-            let mut alpha_vect = Vec::new();
-
-            if !is_full {
-                let mut encoder =
-                    zstd::Encoder::new(&mut alpha_vect, 0).expect("error creating zstd encoder");
-
-                encoder.write(&alpha).expect("error zstd encoding");
-
-                encoder.finish().expect("error finishing zstd encoding");
-            }
-
-            let mut rgb_vect = Vec::new();
-
-            jpeg_encoder::Encoder::new(&mut rgb_vect, args.jpeg_quality)
-                .encode(&rgb, tile_size, tile_size, jpeg_encoder::ColorType::Rgb)
-                .expect("Failed to encode JPEG");
-
-            // println!("Inserting {tile}");
-
-            let y = tile.reversed_y();
-
-            limits
-                .lock()
-                .unwrap()
-                .entry(tile.zoom)
-                .and_modify(|limits: &mut Limits| {
-                    limits.max_x = limits.max_x.max(tile.x);
-                    limits.min_x = limits.min_x.min(tile.x);
-                    limits.max_y = limits.max_y.max(y);
-                    limits.min_y = limits.min_y.min(y);
-                })
-                .or_insert_with(move || Limits {
-                    min_x: tile.x,
-                    max_x: tile.x,
-                    min_y: y,
-                    max_y: y,
-                });
-
-            if let Err(error) = conn.lock().unwrap().execute(
-                "INSERT INTO tiles VALUES (?1, ?2, ?3, ?4, ?5)",
-                (tile.zoom, tile.x, tile.reversed_y(), rgb_vect, alpha_vect),
-            ) {
-                panic!("Err: {tile} {error}");
-            }
-
-            buffer_cache.lock().unwrap().insert(tile, tile_data);
-        }
-
-        let mut status = status.lock().unwrap();
-
-        status.pending_set.remove(&tile);
-        status.waiting_set.remove(&tile);
-        status.processed_set.insert(tile);
-
-        if let Some(parent) = tile.get_parent() {
-            if !status.waiting_set.contains(&parent) && !status.processed_set.contains(&parent) {
-                let children = parent.get_children();
-
-                if children
-                    .iter()
-                    .all(|tile| !status.pending_set.contains(tile))
-                {
-                    status.pending_vec.push(parent);
-                    status.waiting_set.insert(parent);
-                }
-            }
-        }
-
-        if let Some(tile) = status.pending_vec.pop() {
-            worker.push(tile);
-        }
-    };
+    let processor = &processor;
 
     println!("Generating tiles");
 
@@ -495,13 +280,13 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     // First, try to pop a task from the local worker (LIFO)
                     if let Some(task) = worker.pop() {
-                        process_task(task, &worker);
+                        processor.process_task(task, &worker);
                     }
                     // If no tasks locally, try to steal from other threads
                     else if let Steal::Success(task) =
                         stealers.iter().map(Stealer::steal).collect::<Steal<_>>()
                     {
-                        process_task(task, &worker);
+                        processor.process_task(task, &worker);
                     }
                     // If no tasks are left anywhere, exit the loop
                     else {
@@ -512,18 +297,21 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    insert_thread.join().unwrap();
+
     let limits = limits_clone.lock().unwrap();
 
     let limits = serde_json::to_string(&*limits).expect("Error serializing limits");
 
-    conn_clone
-        .lock()
-        .unwrap()
-        .execute(
-            "INSERT INTO metadata (name, value) VALUES ('limits', ?1)",
-            [limits],
-        )
-        .map_err(|e| format!("Error inserting limits: {e}"))?;
+    let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
+
+    conn.execute(
+        "INSERT INTO metadata (name, value) VALUES ('limits', ?1)",
+        [limits],
+    )
+    .map_err(|e| format!("Error inserting limits: {e}"))?;
+
+    stats_collector.thread.join().unwrap();
 
     Ok(())
 }
