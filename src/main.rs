@@ -5,6 +5,7 @@ mod geojson;
 mod processor;
 mod schema;
 mod tile;
+mod tile_inserter;
 mod time_track;
 mod warp;
 
@@ -27,20 +28,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     process::ExitCode,
-    sync::{mpsc::sync_channel, Arc, Mutex},
+    sync::{Arc, Mutex},
     thread::{self, available_parallelism},
-    time::{Duration, Instant},
 };
 use tile::Tile;
-use time_track::{Metric, StatsCollector};
 use warp::Transform;
-
-struct Status {
-    pending_set: HashSet<Tile>,
-    processed_set: HashSet<Tile>,
-    waiting_set: HashSet<Tile>,
-    pending_vec: Vec<Tile>,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Limits {
@@ -48,11 +40,6 @@ struct Limits {
     pub max_x: u32,
     pub min_y: u32,
     pub max_y: u32,
-}
-
-enum StatsMsg {
-    Duration(Metric, Duration),
-    Stats(f32, usize, Tile),
 }
 
 fn main() -> ExitCode {
@@ -88,14 +75,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             .get() as u16
     });
 
-    let source_ds = Dataset::open(&args.source_file).expect("Error opening source");
-
-    let band_count = source_ds.raster_count();
-
-    if band_count != 4 {
-        return Err("Expecting 4 bands".into());
-    }
-
     let mut bounding_polygon = args
         .bounding_polygon
         .map(|path| parse_geojson_polygon(&path))
@@ -107,6 +86,14 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         .map(reproject_polygon)
         .transpose()
         .map_err(|e| format!("Error reprojecting polygon: {e}"))?;
+
+    let source_ds = Dataset::open(&args.source_file).expect("Error opening source");
+
+    let band_count = source_ds.raster_count();
+
+    if band_count != 4 {
+        return Err("Expecting 4 bands".into());
+    }
 
     if !args.resume {
         let conn =
@@ -141,14 +128,14 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         Transform::Srs(source_srs.to_wkt()?, target_srs.to_wkt()?)
     };
 
+    println!("Computing tile coverage");
+
     let trans = CoordTransform::new_with_options(&source_srs, &target_srs, &options)
         .map_err(|e| format!("Failed to create coordinate transform: {e}"))?
         .transform_bounds(&[bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y], 21)
         .map_err(|e| format!("Error transforming bounds: {e}"))?;
 
     let bounding_polygon = bounding_polygon.as_ref();
-
-    println!("Computing tile coverage");
 
     let mut tiles: Vec<_> = covered_tiles(
         &BBox {
@@ -175,10 +162,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Preparing queues");
 
-    let workers: Vec<_> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
-
-    let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
-
     let mut pending_set: HashSet<_> = tiles.iter().copied().collect();
     let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
     let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
@@ -199,6 +182,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let workers: Vec<_> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
+
     for _ in 0..num_threads {
         let Some(tile) = tiles.pop() else {
             break;
@@ -207,70 +192,35 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         workers[0].push(tile);
     }
 
-    let total = pending_set.len();
-
-    let status = Arc::new(Mutex::new(Status {
-        pending_set,
-        processed_set: HashSet::new(),
-        waiting_set: HashSet::new(),
-        pending_vec: tiles,
-    }));
-
     let limits = Arc::new(Mutex::new(HashMap::<u8, Limits>::new()));
 
     let limits_clone = Arc::clone(&limits);
 
-    let stats_collector = StatsCollector::new(args.debug);
+    let (stats_tx, stats_collector_thread) = time_track::new(args.debug);
 
-    let tx = stats_collector.tx;
+    let (insert_thread, data_tx) = tile_inserter::new(target_file, num_threads, stats_tx.clone());
 
-    let tx_clone = tx.clone();
-
-    let (data_tx, data_rx) = sync_channel::<(Tile, Vec<u8>, Vec<u8>)>(num_threads as usize * 16);
-
-    let insert_conn = Connection::open(target_file).unwrap();
-
-    let insert_thread = thread::spawn(move || {
-        let mut stmt = insert_conn
-            .prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data, tile_alpha) VALUES (?1, ?2, ?3, ?4, ?5)")
-            .unwrap();
-
-        for msg in data_rx {
-            let instant = Instant::now();
-
-            stmt.execute((msg.0.zoom, msg.0.x, msg.0.reversed_y(), msg.1, msg.2))
-                .unwrap();
-
-            tx_clone
-                .send(StatsMsg::Duration(
-                    Metric::Insert,
-                    Instant::now().duration_since(instant),
-                ))
-                .unwrap();
-        }
-    });
-
-    let processor = Processor::new(
+    let processor = &Processor::new(
         args.resume,
         args.tile_size,
         args.max_zoom,
-        total,
         target_file,
-        tx,
+        stats_tx,
         args.debug,
         &args.source_file,
-        status,
         transform,
         args.jpeg_quality,
         limits,
         data_tx,
+        pending_set,
+        tiles,
     );
-
-    let processor = &processor;
 
     println!("Generating tiles");
 
     thread::scope(|scope| {
+        let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
+
         for worker in workers {
             let stealers = Arc::clone(&stealers);
 
@@ -297,6 +247,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     insert_thread.join().unwrap();
 
+    stats_collector_thread.join().unwrap();
+
     let limits = {
         let limits = limits_clone.lock().unwrap();
 
@@ -310,8 +262,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         [limits],
     )
     .map_err(|e| format!("Error inserting limits: {e}"))?;
-
-    stats_collector.thread.join().unwrap();
 
     Ok(())
 }

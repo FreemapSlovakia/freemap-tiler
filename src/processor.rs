@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::{
@@ -17,11 +17,18 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::{
     tile::Tile,
-    time_track::Metric,
+    time_track::{Metric, StatsMsg},
     warp::{self, Transform},
-    Limits, StatsMsg, Status,
+    Limits,
 };
 use std::sync::Arc;
+
+struct Status {
+    pending_set: HashSet<Tile>,
+    processed_set: HashSet<Tile>,
+    waiting_set: HashSet<Tile>,
+    pending_vec: Vec<Tile>,
+}
 
 pub struct Processor {
     no_resume: Arc<AtomicBool>,
@@ -49,17 +56,26 @@ impl Processor {
         resume: bool,
         tile_size: u16,
         max_zoom: u8,
-        total: usize,
         target_file: &Path,
         tx: Sender<StatsMsg>,
         debug: bool,
         source_file: &Path,
-        status: Arc<Mutex<Status>>,
         transform: Transform,
         jpeg_quality: u8,
         limits: Arc<Mutex<HashMap<u8, Limits>>>,
         data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
+        pending_set: HashSet<Tile>,
+        pending_vec: Vec<Tile>,
     ) -> Self {
+        let total = pending_set.len();
+
+        let status = Status {
+            pending_set,
+            processed_set: HashSet::new(),
+            waiting_set: HashSet::new(),
+            pending_vec,
+        };
+
         let no_resume = Arc::new(AtomicBool::new(!resume));
 
         signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&no_resume)).unwrap();
@@ -84,7 +100,7 @@ impl Processor {
             tx,
             debug,
             source_file: source_file.to_path_buf(),
-            status,
+            status: Arc::new(Mutex::new(status)),
             transform,
             jpeg_quality,
             limits,

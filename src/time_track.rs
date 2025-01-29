@@ -1,3 +1,4 @@
+use crate::tile::Tile;
 use std::{
     fmt::{self, Display, Formatter},
     sync::mpsc::{self, Sender},
@@ -5,7 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{tile::Tile, StatsMsg};
+pub enum StatsMsg {
+    Duration(Metric, Duration),
+    Stats(f32, usize, Tile),
+}
 
 pub enum Metric {
     Select,
@@ -87,58 +91,51 @@ impl Display for TimeStats {
     }
 }
 
-pub struct StatsCollector {
-    pub tx: Sender<StatsMsg>,
-    pub thread: JoinHandle<()>,
-}
+pub fn new(debug: bool) -> (Sender<StatsMsg>, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel::<StatsMsg>();
 
-impl StatsCollector {
-    pub fn new(debug: bool) -> Self {
-        let (tx, rx) = mpsc::channel::<StatsMsg>();
+    let mut stats = TimeStats::default();
 
-        let mut stats = TimeStats::default();
+    let mut last_log = Instant::now();
 
-        let mut last_log = Instant::now();
+    let mut pct = 0_f32;
 
-        let mut pct = 0_f32;
+    let mut queue_len = 0_usize;
 
-        let mut queue_len = 0_usize;
+    let mut tile = Tile {
+        x: 0,
+        y: 0,
+        zoom: 0,
+    };
 
-        let mut tile = Tile {
-            x: 0,
-            y: 0,
-            zoom: 0,
-        };
+    let thread = thread::spawn(move || {
+        for msg in rx {
+            match msg {
+                StatsMsg::Duration(typ, duration) => {
+                    let now = Instant::now();
 
-        let thread = thread::spawn(move || {
-            for msg in rx {
-                match msg {
-                    StatsMsg::Duration(typ, duration) => {
-                        let now = Instant::now();
+                    if now.duration_since(last_log).as_secs() > 10 {
+                        last_log = now;
 
-                        if now.duration_since(last_log).as_secs() > 10 {
-                            last_log = now;
-
-                            if debug {
-                                print!("\n");
-                            }
-
-                            println!("{pct:.2} % | {queue_len} | {tile} | {stats}");
-
-                            stats = TimeStats::default();
+                        if debug {
+                            print!("\n");
                         }
 
-                        stats.add(&typ, duration);
+                        println!("{pct:.2} % | {queue_len} | {tile} | {stats}");
+
+                        stats = TimeStats::default();
                     }
-                    StatsMsg::Stats(pct_, queue_len_, tile_) => {
-                        pct = pct_;
-                        queue_len = queue_len_;
-                        tile = tile_;
-                    }
+
+                    stats.add(&typ, duration);
+                }
+                StatsMsg::Stats(pct_, queue_len_, tile_) => {
+                    pct = pct_;
+                    queue_len = queue_len_;
+                    tile = tile_;
                 }
             }
-        });
+        }
+    });
 
-        Self { tx, thread }
-    }
+    (tx, thread)
 }

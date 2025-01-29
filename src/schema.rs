@@ -2,6 +2,7 @@ use rusqlite::{Connection, Error};
 
 pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
     conn.pragma_update(None, "synchronous", "OFF")?;
+
     conn.pragma_update(None, "journal_mode", "WAL")?;
 
     conn.execute(
@@ -22,6 +23,11 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
           tile_alpha BLOB NOT NULL,
           -- PRIMARY KEY (zoom_level, tile_column, tile_row)
         )",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE INDEX idx_tiles ON new_db.tiles (zoom_level, tile_column, tile_row)",
         (),
     )?;
 
