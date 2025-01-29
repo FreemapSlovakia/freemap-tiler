@@ -323,8 +323,12 @@ impl Processor {
 
                         for (i, buffer) in buffers.iter().enumerate() {
                             let b = buffer[(x, y)];
+
                             out_buffer[offset + i] = b;
-                            no_data = no_data && (b == 0);
+
+                            if i == 3 {
+                                no_data &= b == 0;
+                            }
                         }
                     }
                 }
