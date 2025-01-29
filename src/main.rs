@@ -233,13 +233,13 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let insert_conn = Connection::open(target_file).unwrap();
 
     let insert_thread = thread::spawn(move || {
-        let instant = Instant::now();
-
         let mut stmt = insert_conn
             .prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data, tile_alpha) VALUES (?1, ?2, ?3, ?4, ?5)")
             .unwrap();
 
         for msg in data_rx {
+            let instant = Instant::now();
+
             stmt.execute((msg.0.zoom, msg.0.x, msg.0.reversed_y(), msg.1, msg.2))
                 .unwrap();
 
