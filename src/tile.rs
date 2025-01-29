@@ -9,7 +9,7 @@ pub struct Tile {
 }
 
 impl Tile {
-    pub fn reversed_y(&self) -> u32 {
+    pub const fn reversed_y(&self) -> u32 {
         (1 << self.zoom) - 1 - self.y
     }
 
@@ -72,8 +72,8 @@ impl Tile {
         ]
     }
 
-    pub fn sort_by_zorder(tiles: &mut [Tile]) {
-        tiles.sort_by_cached_key(Tile::morton_code);
+    pub fn sort_by_zorder(tiles: &mut [Self]) {
+        tiles.sort_by_cached_key(Self::morton_code);
     }
 
     fn interleave(v: u32) -> u64 {

@@ -24,7 +24,7 @@ pub struct Args {
     #[arg(long)]
     pub transform_pipeline: Option<String>,
 
-    /// Bounding polygon in GeoJSON file
+    /// Bounding polygon in `GeoJSON`` file
     #[arg(long)]
     pub bounding_polygon: Option<PathBuf>,
 

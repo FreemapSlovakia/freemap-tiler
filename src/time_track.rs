@@ -57,7 +57,7 @@ pub struct TimeStats {
 }
 
 impl TimeStats {
-    pub fn add(&mut self, metric: Metric, duration: Duration) {
+    pub fn add(&mut self, metric: &Metric, duration: Duration) {
         match metric {
             Metric::Select => self.select.add(duration),
             Metric::Insert => self.insert.add(duration),
@@ -93,7 +93,7 @@ pub struct StatsCollector {
 }
 
 impl StatsCollector {
-    pub fn new(debug: bool) -> StatsCollector {
+    pub fn new(debug: bool) -> Self {
         let (tx, rx) = mpsc::channel::<StatsMsg>();
 
         let mut stats = TimeStats::default();
@@ -128,7 +128,7 @@ impl StatsCollector {
                             stats = TimeStats::default();
                         }
 
-                        stats.add(typ, duration);
+                        stats.add(&typ, duration);
                     }
                     StatsMsg::Stats(pct_, queue_len_, tile_) => {
                         pct = pct_;
@@ -139,6 +139,6 @@ impl StatsCollector {
             }
         });
 
-        StatsCollector { tx, thread }
+        Self { tx, thread }
     }
 }

@@ -104,7 +104,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     bounding_polygon
         .as_mut()
-        .map(|mut polygon| reproject_polygon(&mut polygon))
+        .map(reproject_polygon)
         .transpose()
         .map_err(|e| format!("Error reprojecting polygon: {e}"))?;
 
@@ -161,13 +161,11 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .par_bridge()
     .filter(|tile| {
-        bounding_polygon
-            .map(|bounding_polygon| {
-                tile.bounds_to_epsg3857(args.tile_size)
-                    .to_polygon()
-                    .intersects(bounding_polygon)
-            })
-            .unwrap_or(true)
+        bounding_polygon.map_or(true, |bounding_polygon| {
+            tile.bounds_to_epsg3857(args.tile_size)
+                .to_polygon()
+                .intersects(bounding_polygon)
+        })
     })
     .collect();
 
@@ -299,9 +297,11 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     insert_thread.join().unwrap();
 
-    let limits = limits_clone.lock().unwrap();
+    let limits = {
+        let limits = limits_clone.lock().unwrap();
 
-    let limits = serde_json::to_string(&*limits).expect("Error serializing limits");
+        serde_json::to_string(&*limits).expect("Error serializing limits")
+    };
 
     let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
 

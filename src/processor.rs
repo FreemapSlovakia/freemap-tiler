@@ -72,7 +72,7 @@ impl Processor {
                 .unwrap(),
         ));
 
-        Processor {
+        Self {
             no_resume,
             buffer_cache: Arc::new(Mutex::new(HashMap::new())),
             tile_size,
@@ -119,7 +119,7 @@ impl Processor {
                     let conn = self.select_conn.lock().unwrap();
 
                     let mut stmt = conn.prepare(
-                    "SELECT tile_data, tile_alpha FROM tiles WHERE zoom_level = ?1 AND tile_column = ?2 AND tile_row = ?3").unwrap();
+                        "SELECT tile_data, tile_alpha FROM tiles WHERE zoom_level = ?1 AND tile_column = ?2 AND tile_row = ?3").unwrap();
 
                     let mut rows = stmt.query((tile.zoom, tile.x, tile.reversed_y())).unwrap();
 
@@ -144,7 +144,7 @@ impl Processor {
                     }
                 }
 
-                if rgb.len() == 0 {
+                if rgb.is_empty() {
                     steps.push('◯');
 
                     break 'out;
@@ -160,7 +160,7 @@ impl Processor {
 
                 decoder.read_image(&mut tile_data).unwrap();
 
-                let alpha = if alpha.len() == 0 {
+                let alpha = if alpha.is_empty() {
                     vec![255; 256 * 256]
                 } else {
                     zstd::stream::decode_all(alpha.as_slice()).unwrap()
@@ -169,7 +169,7 @@ impl Processor {
                 let rgba = tile_data
                     .chunks(3)
                     .zip(alpha.chunks(1))
-                    .flat_map(|(a, b)| a.into_iter().chain(b))
+                    .flat_map(|(a, b)| a.iter().chain(b))
                     .copied()
                     .collect::<Vec<u8>>();
 
@@ -380,7 +380,7 @@ impl Processor {
                     let mut encoder =
                         zstd::Encoder::new(&mut alpha_enc, 0).expect("error creating zstd encoder");
 
-                    encoder.write(&alpha).expect("error zstd encoding");
+                    encoder.write_all(&alpha).expect("error zstd encoding");
 
                     encoder.finish().expect("error finishing zstd encoding");
                 }
@@ -451,6 +451,8 @@ impl Processor {
         if let Some(tile) = status.pending_vec.pop() {
             worker.push(tile);
         }
+
+        drop(status);
 
         if self.debug {
             print!("|{}", steps.iter().collect::<String>());

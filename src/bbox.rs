@@ -43,7 +43,7 @@ impl Iterator for TileIterator {
 }
 
 impl BBox {
-    pub fn to_polygon(&self) -> Polygon<f64> {
+    pub fn to_polygon(self) -> Polygon<f64> {
         Polygon::new(
             geo::LineString::from(vec![
                 (self.min_x, self.min_y),

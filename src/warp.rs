@@ -75,22 +75,18 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, transform:
 
                 result
             }
-            Transform::Srs(source_wkt, target_wkt) => {
-                let result = GDALReprojectImage(
-                    source_ds.c_dataset(),
-                    source_wkt.as_ptr() as *const i8,
-                    target_ds.c_dataset(),
-                    target_wkt.as_ptr() as *const i8,
-                    GDALResampleAlg::GRA_Lanczos,
-                    0.0,
-                    0.0,
-                    None,
-                    ptr::null_mut(),
-                    warp_options,
-                );
-
-                result
-            }
+            Transform::Srs(source_wkt, target_wkt) => GDALReprojectImage(
+                source_ds.c_dataset(),
+                source_wkt.as_ptr().cast::<i8>(),
+                target_ds.c_dataset(),
+                target_wkt.as_ptr().cast::<i8>(),
+                GDALResampleAlg::GRA_Lanczos,
+                0.0,
+                0.0,
+                None,
+                ptr::null_mut(),
+                warp_options,
+            ),
         };
 
         GDALDestroyWarpOptions(warp_options);
