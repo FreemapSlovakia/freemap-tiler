@@ -20,14 +20,13 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
           tile_column INTEGER NOT NULL,
           tile_row INTEGER NOT NULL,
           tile_data BLOB NOT NULL,
-          tile_alpha BLOB NOT NULL,
-          -- PRIMARY KEY (zoom_level, tile_column, tile_row)
+          tile_alpha BLOB NOT NULL
         )",
         (),
     )?;
 
     conn.execute(
-        "CREATE INDEX idx_tiles ON new_db.tiles (zoom_level, tile_column, tile_row)",
+        "CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row)",
         (),
     )?;
 

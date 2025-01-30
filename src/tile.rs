@@ -45,6 +45,27 @@ impl Tile {
         }
     }
 
+    pub fn get_ancestor(&self, level: u8) -> Option<Self> {
+        let mut tile = Some(*self);
+
+        for _ in 0..level {
+            let Some(ref r_tile) = tile else {
+                break;
+            };
+
+            tile = r_tile.get_parent();
+        }
+
+        tile
+    }
+
+    pub fn get_sector_in_parent(&self, levels: u8) -> (u32, u32) {
+        (
+            self.x & ((1_u32 << levels) - 1),
+            self.y & ((1_u32 << levels) - 1),
+        )
+    }
+
     pub const fn get_children(&self) -> [Self; 4] {
         let zoom = self.zoom + 1;
 

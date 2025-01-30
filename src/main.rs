@@ -4,6 +4,7 @@ mod geo;
 mod geojson;
 mod processor;
 mod schema;
+mod state;
 mod tile;
 mod tile_inserter;
 mod time_track;
@@ -184,12 +185,44 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let workers: Vec<_> = (0..num_threads).map(|_| Worker::new_lifo()).collect();
 
-    for _ in 0..num_threads {
-        let Some(tile) = tiles.pop() else {
-            break;
-        };
+    // populate workers
+    'outer: for _ in 0..num_threads {
+        let mut task_tiles = Vec::new();
 
-        workers[0].push(tile);
+        let mut key: Option<Tile> = None;
+
+        loop {
+            let Some(tile) = tiles.pop() else {
+                if !task_tiles.is_empty() {
+                    workers[0].push(task_tiles);
+                }
+
+                break 'outer;
+            };
+
+            let curr_key = tile.get_ancestor(args.warp_zoom_offset);
+
+            let Some(curr_key) = curr_key else {
+                // no parent
+                workers[0].push(vec![tile]);
+
+                break;
+            };
+
+            if key.is_none() {
+                key = Some(curr_key);
+            }
+
+            if Some(curr_key) == key {
+                task_tiles.push(tile);
+            } else {
+                tiles.push(tile); // return it back
+
+                workers[0].push(task_tiles);
+
+                break;
+            }
+        }
     }
 
     let limits = Arc::new(Mutex::new(HashMap::<u8, Limits>::new()));
@@ -200,50 +233,53 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (insert_thread, data_tx) = tile_inserter::new(target_file, num_threads, stats_tx.clone());
 
-    let processor = &Processor::new(
-        args.resume,
-        args.tile_size,
-        args.max_zoom,
-        target_file,
-        stats_tx,
-        args.debug,
-        &args.source_file,
-        transform,
-        args.jpeg_quality,
-        limits,
-        data_tx,
-        pending_set,
-        tiles,
-    );
+    {
+        let processor = &Processor::new(
+            args.resume,
+            args.tile_size,
+            args.max_zoom,
+            target_file,
+            stats_tx,
+            args.debug,
+            &args.source_file,
+            transform,
+            args.jpeg_quality,
+            limits,
+            data_tx,
+            pending_set,
+            tiles,
+            args.warp_zoom_offset,
+        );
 
-    println!("Generating tiles");
+        println!("Generating tiles");
 
-    thread::scope(|scope| {
-        let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
+        thread::scope(|scope| {
+            let stealers: Arc<Vec<_>> = Arc::new(workers.iter().map(Worker::stealer).collect());
 
-        for worker in workers {
-            let stealers = Arc::clone(&stealers);
+            for worker in workers {
+                let stealers = Arc::clone(&stealers);
 
-            scope.spawn(move || {
-                loop {
-                    // First, try to pop a task from the local worker (LIFO)
-                    if let Some(task) = worker.pop() {
-                        processor.process_task(task, &worker);
+                scope.spawn(move || {
+                    loop {
+                        // First, try to pop a task from the local worker (LIFO)
+                        if let Some(task) = worker.pop() {
+                            processor.process_task(task, &worker);
+                        }
+                        // If no tasks locally, try to steal from other threads
+                        else if let Steal::Success(task) =
+                            stealers.iter().map(Stealer::steal).collect::<Steal<_>>()
+                        {
+                            processor.process_task(task, &worker);
+                        }
+                        // If no tasks are left anywhere, exit the loop
+                        else {
+                            break;
+                        }
                     }
-                    // If no tasks locally, try to steal from other threads
-                    else if let Steal::Success(task) =
-                        stealers.iter().map(Stealer::steal).collect::<Steal<_>>()
-                    {
-                        processor.process_task(task, &worker);
-                    }
-                    // If no tasks are left anywhere, exit the loop
-                    else {
-                        break;
-                    }
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+    }
 
     insert_thread.join().unwrap();
 

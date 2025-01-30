@@ -40,6 +40,10 @@ pub struct Args {
     #[arg(long, default_value_t = 85)]
     pub jpeg_quality: u8,
 
+    /// Advanced: zoom offset of a tile parent to reproject at once. Modify to fine-tune the performance.
+    #[arg(long, default_value_t = 3)]
+    pub warp_zoom_offset: u8,
+
     /// Resume
     #[arg(long, default_value_t = false)]
     pub resume: bool,
