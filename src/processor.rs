@@ -1,3 +1,7 @@
+use crossbeam_deque::Worker;
+use gdal::{Dataset, DriverManager};
+use image::{codecs::jpeg::JpegDecoder, imageops::FilterType, ImageDecoder, RgbaImage};
+use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::{HashMap, HashSet},
     io::{Cursor, Write},
@@ -9,11 +13,6 @@ use std::{
     },
     time::Instant,
 };
-
-use crossbeam_deque::Worker;
-use gdal::{Dataset, DriverManager};
-use image::{codecs::jpeg::JpegDecoder, imageops::FilterType, ImageDecoder, RgbaImage};
-use rusqlite::{Connection, OpenFlags};
 
 use crate::{
     state::State,

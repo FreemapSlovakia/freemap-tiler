@@ -19,6 +19,3 @@ geojson = "0.24.1"
 proj = "0.27.0"
 rayon = "1.10.0"
 signal-hook = "0.3.17"
-
-# [profile.release]
-# debug = true

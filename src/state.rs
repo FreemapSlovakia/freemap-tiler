@@ -1,6 +1,5 @@
-use std::collections::HashSet;
-
 use crate::tile::Tile;
+use std::collections::HashSet;
 
 pub struct State {
     pending_set: HashSet<Tile>,

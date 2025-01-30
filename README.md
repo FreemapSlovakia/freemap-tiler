@@ -41,12 +41,20 @@ Options:
           Source SRS
       --transform-pipeline <TRANSFORM_PIPELINE>
           Projection transformation pipeline
+      --bounding-polygon <BOUNDING_POLYGON>
+          Bounding polygon in `GeoJSON`` file
       --tile-size <TILE_SIZE>
           Tile size [default: 256]
       --num-threads <NUM_THREADS>
           Number of threads for parallel processing [default: available parallelism]
       --jpeg-quality <JPEG_QUALITY>
           JPEG quality [default: 85]
+      --warp-zoom-offset <WARP_ZOOM_OFFSET>
+          Advanced: zoom offset of a parent tile to reproject at once. Modify to fine-tune the performance [default: 3]
+      --resume
+          Resume
+      --debug
+          Debug
   -h, --help
           Print help
   -V, --version
