@@ -299,9 +299,11 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    insert_thread.join().unwrap();
+    insert_thread.join().expect("error joining insert_thread");
 
-    stats_collector_thread.join().unwrap();
+    stats_collector_thread
+        .join()
+        .expect("error joining stats_collector_thread");
 
     let limits = {
         let limits = limits_clone.lock().unwrap();
