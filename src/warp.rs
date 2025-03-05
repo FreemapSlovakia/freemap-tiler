@@ -36,7 +36,7 @@ pub fn warp(source_ds: &Dataset, target_ds: &Dataset, tile_size: u16, transform:
                     options.as_mut_ptr(),
                 );
 
-                drop(CString::from_raw(*options.get(0).unwrap()));
+                drop(CString::from_raw(*options.first().unwrap()));
 
                 assert!(
                     !gen_img_proj_transformer.is_null(),

@@ -17,7 +17,7 @@ impl State {
         max_zoom: u8,
         zoom_offset: u8,
     ) -> Self {
-        State {
+        Self {
             pending_set,
             processed_set: HashSet::new(),
             waiting_set: HashSet::new(),
@@ -79,10 +79,6 @@ impl State {
             }
         }
 
-        if tiles.is_empty() {
-            None
-        } else {
-            Some(tiles)
-        }
+        if tiles.is_empty() { None } else { Some(tiles) }
     }
 }

@@ -1,37 +1,36 @@
 use crossbeam_deque::Worker;
 use gdal::{Dataset, DriverManager};
-use image::{codecs::jpeg::JpegDecoder, imageops::FilterType, ImageDecoder, RgbaImage};
-use rusqlite::{Connection, OpenFlags};
+use image::{ImageDecoder, RgbaImage, codecs::jpeg::JpegDecoder, imageops::FilterType};
+use rusqlite::Connection;
 use std::{
     collections::{HashMap, HashSet},
     io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{Sender, SyncSender},
         Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{Sender, SyncSender},
     },
     time::Instant,
 };
 
 use crate::{
+    Limits,
     state::State,
     tile::Tile,
     time_track::{Metric, StatsMsg},
     warp::{self, Transform},
-    Limits,
 };
 use std::sync::Arc;
 
 pub struct Processor {
-    no_resume: Arc<AtomicBool>,
     buffer_cache: Arc<Mutex<HashMap<Tile, Vec<u8>>>>,
     tile_size: u16,
     max_zoom: u8,
     pool: Arc<Mutex<Vec<Dataset>>>,
     counter: AtomicUsize,
     total: usize,
-    select_conn: Arc<Mutex<Connection>>,
+    select_conn: Option<Arc<Mutex<Connection>>>,
     stats_tx: Sender<StatsMsg>,
     debug: bool,
     source_file: PathBuf,
@@ -41,16 +40,16 @@ pub struct Processor {
     limits: Arc<Mutex<HashMap<u8, Limits>>>,
     data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
     zoom_offset: u8,
+    insert_empty: bool,
 }
 
 const BAND_COUNT: usize = 4;
 
 impl Processor {
     pub fn new(
-        resume: bool,
         tile_size: u16,
         max_zoom: u8,
-        target_file: &Path,
+        continue_file: Option<&Path>,
         stats_tx: Sender<StatsMsg>,
         debug: bool,
         source_file: &Path,
@@ -61,25 +60,23 @@ impl Processor {
         pending_set: HashSet<Tile>,
         pending_vec: Vec<Tile>,
         zoom_offset: u8,
+        insert_empty: bool,
     ) -> Self {
         let total = pending_set.len();
 
         let state = State::new(pending_vec, pending_set, max_zoom, zoom_offset);
 
-        let no_resume = Arc::new(AtomicBool::new(!resume));
-
-        signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&no_resume)).unwrap();
+        // signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&no_resume)).unwrap();
 
         let pool = Arc::new(Mutex::new(Vec::<Dataset>::new()));
 
-        let select_conn = Arc::new(Mutex::new(
-            Connection::open_with_flags(target_file, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| format!("Error creating output: {e}"))
-                .unwrap(),
-        ));
+        let select_conn = continue_file.map(|continue_file| {
+            Arc::new(Mutex::new(
+                Connection::open(continue_file).expect("error opening continue mbtiles connection"),
+            ))
+        });
 
         Self {
-            no_resume,
             buffer_cache: Arc::new(Mutex::new(HashMap::new())),
             tile_size,
             max_zoom,
@@ -96,6 +93,7 @@ impl Processor {
             limits,
             data_tx,
             zoom_offset,
+            insert_empty,
         }
     }
 
@@ -112,89 +110,107 @@ impl Processor {
             self.stats_tx
                 .send(StatsMsg::Stats(
                     counter as f32 / self.total as f32 * 100.0,
-                    self.buffer_cache.lock().unwrap().len(),
+                    self.buffer_cache
+                        .lock()
+                        .expect("error locking buffer_cache")
+                        .len(),
                     tile,
                 ))
-                .unwrap();
+                .expect("error sending stats");
 
             let mut steps = Vec::new();
 
             'out: {
                 'resume: {
-                    if self.no_resume.load(Ordering::Relaxed) {
-                        break 'resume;
-                    }
+                    if let Some(ref select_conn) = self.select_conn {
+                        let (rgb, alpha) = {
+                            let select_instant = Instant::now();
 
-                    let (rgb, alpha) = {
-                        let select_instant = Instant::now();
+                            let conn = select_conn.lock().expect("error locking select_conn");
 
-                        let conn = self.select_conn.lock().unwrap();
+                            let mut stmt = conn
+                                .prepare("SELECT tile_data, tile_alpha FROM tiles WHERE zoom_level = ?1 AND tile_column = ?2 AND tile_row = ?3")
+                                .expect("error preparing select statement");
 
-                        let mut stmt = conn.prepare(
-                            "SELECT tile_data, tile_alpha FROM tiles WHERE zoom_level = ?1 AND tile_column = ?2 AND tile_row = ?3").unwrap();
+                            let mut rows = stmt
+                                .query((tile.zoom, tile.x, tile.reversed_y()))
+                                .expect("error querying tile");
 
-                        let mut rows = stmt.query((tile.zoom, tile.x, tile.reversed_y())).unwrap();
+                            let Some(row) = rows.next().expect("error getting selected tile")
+                            else {
+                                break 'resume;
+                            };
 
-                        let Some(row) = rows.next().unwrap() else {
-                            break 'resume;
+                            let rgb = row
+                                .get::<_, Vec<u8>>(0)
+                                .expect("error getting selected rgb");
+
+                            let alpha = row
+                                .get::<_, Vec<u8>>(1)
+                                .expect("error getting selected alpha");
+
+                            self.stats_tx
+                                .send(StatsMsg::Duration(
+                                    Metric::Select,
+                                    Instant::now().duration_since(select_instant),
+                                ))
+                                .expect("error sending stats");
+
+                            (rgb, alpha)
                         };
 
-                        let rgb = row.get::<_, Vec<u8>>(0).unwrap();
+                        if tile.zoom < self.max_zoom {
+                            let children = tile.get_children();
 
-                        let alpha = row.get::<_, Vec<u8>>(1).unwrap();
+                            let mut buffer_cache = self
+                                .buffer_cache
+                                .lock()
+                                .expect("error locking buffer_cache");
 
-                        self.stats_tx
-                            .send(StatsMsg::Duration(
-                                Metric::Select,
-                                Instant::now().duration_since(select_instant),
-                            ))
-                            .unwrap();
-
-                        (rgb, alpha)
-                    };
-
-                    if tile.zoom < self.max_zoom {
-                        let children = tile.get_children();
-
-                        let mut buffer_cache = self.buffer_cache.lock().unwrap();
-
-                        for tile in children {
-                            buffer_cache.remove(&tile);
+                            for tile in children {
+                                buffer_cache.remove(&tile);
+                            }
                         }
-                    }
 
-                    if rgb.is_empty() {
-                        steps.push('○');
+                        if rgb.is_empty() {
+                            steps.push('○');
+
+                            break 'out;
+                        }
+
+                        steps.push('●');
+
+                        let cursor = Cursor::new(&rgb);
+
+                        let decoder =
+                            JpegDecoder::new(cursor).expect("error creading jpeg decoder");
+
+                        let mut tile_data = vec![0; decoder.total_bytes() as usize];
+
+                        decoder
+                            .read_image(&mut tile_data)
+                            .expect("error image-decoding");
+
+                        let alpha = if alpha.is_empty() {
+                            vec![255; 256 * 256]
+                        } else {
+                            zstd::stream::decode_all(alpha.as_slice()).expect("error zstd-decoding")
+                        };
+
+                        let rgba = tile_data
+                            .chunks(3)
+                            .zip(alpha.chunks(1))
+                            .flat_map(|(a, b)| a.iter().chain(b))
+                            .copied()
+                            .collect::<Vec<u8>>();
+
+                        self.buffer_cache
+                            .lock()
+                            .expect("error locking buffer_cache")
+                            .insert(tile, rgba);
 
                         break 'out;
                     }
-
-                    steps.push('●');
-
-                    let cursor = Cursor::new(&rgb);
-
-                    let decoder = JpegDecoder::new(cursor).unwrap();
-
-                    let mut tile_data = vec![0; decoder.total_bytes() as usize];
-
-                    decoder.read_image(&mut tile_data).unwrap();
-
-                    let alpha = if alpha.is_empty() {
-                        vec![255; 256 * 256]
-                    } else {
-                        zstd::stream::decode_all(alpha.as_slice()).unwrap()
-                    };
-
-                    let rgba = tile_data
-                        .chunks(3)
-                        .zip(alpha.chunks(1))
-                        .flat_map(|(a, b)| a.iter().chain(b))
-                        .copied()
-                        .collect::<Vec<u8>>();
-
-                    self.buffer_cache.lock().unwrap().insert(tile, rgba);
-
-                    break 'out;
                 } // 'resume
 
                 let rgba = if tile.zoom < self.max_zoom {
@@ -211,7 +227,10 @@ impl Processor {
                     let children = tile.get_children();
 
                     let sectors: Vec<_> = {
-                        let mut buffer_cache = self.buffer_cache.lock().unwrap();
+                        let mut buffer_cache = self
+                            .buffer_cache
+                            .lock()
+                            .expect("error locking buffer_cache");
 
                         children
                             .iter()
@@ -266,7 +285,7 @@ impl Processor {
                                 Metric::Compose,
                                 Instant::now().duration_since(compose_instant),
                             ))
-                            .unwrap();
+                            .expect("error sending stats");
 
                         Some(img)
                     } else {
@@ -280,7 +299,7 @@ impl Processor {
                     let megatile = if let Some(ref megatile) = megatile {
                         megatile
                     } else {
-                        let ds = self.pool.lock().unwrap().pop();
+                        let ds = self.pool.lock().expect("error locking dataset pool").pop();
 
                         let source_ds = ds.map_or_else(
                             || Dataset::open(&self.source_file).expect("Error opening source"),
@@ -291,7 +310,7 @@ impl Processor {
 
                         let bbox = tile
                             .get_ancestor(self.zoom_offset)
-                            .unwrap() // TODO
+                            .expect("error getting tile ancestor") // TODO
                             .bounds_to_epsg3857(mega_size);
 
                         let mut target_ds = DriverManager::get_driver_by_name("MEM")
@@ -319,7 +338,10 @@ impl Processor {
 
                         warp::warp(&source_ds, &target_ds, mega_size, &self.transform);
 
-                        self.pool.lock().unwrap().push(source_ds);
+                        self.pool
+                            .lock()
+                            .expect("error loging dataset pool")
+                            .push(source_ds);
 
                         let buffers: Vec<_> = (1..=BAND_COUNT)
                             .map(|band| {
@@ -356,11 +378,11 @@ impl Processor {
                                 Metric::Warp,
                                 Instant::now().duration_since(warp_instant),
                             ))
-                            .unwrap();
+                            .expect("errro sending stats");
 
                         megatile = Some(megatile1);
 
-                        &megatile.as_ref().unwrap()
+                        megatile.as_ref().expect("megatile is missing")
                     };
 
                     let (sx, sy) = tile.get_sector_in_parent(self.zoom_offset);
@@ -392,11 +414,7 @@ impl Processor {
                         }
                     }
 
-                    if no_data {
-                        None
-                    } else {
-                        Some(out_buffer)
-                    }
+                    if no_data { None } else { Some(out_buffer) }
                 }; // tile.zoom < max_zoom
 
                 if let Some(rgba) = rgba {
@@ -454,7 +472,7 @@ impl Processor {
 
                     self.limits
                         .lock()
-                        .unwrap()
+                        .expect("error locking limits")
                         .entry(tile.zoom)
                         .and_modify(|limits: &mut Limits| {
                             limits.max_x = limits.max_x.max(tile.x);
@@ -469,18 +487,25 @@ impl Processor {
                             max_y: y,
                         });
 
-                    self.data_tx.send((tile, rgb_enc, alpha_enc)).unwrap();
+                    self.data_tx
+                        .send((tile, rgb_enc, alpha_enc))
+                        .expect("error sending data");
 
-                    self.buffer_cache.lock().unwrap().insert(tile, rgba);
-                } else {
+                    self.buffer_cache
+                        .lock()
+                        .expect("error locking buffer_cache")
+                        .insert(tile, rgba);
+                } else if self.insert_empty {
                     steps.push('○');
 
                     // insert "nothing" - used for resuming
-                    self.data_tx.send((tile, vec![], vec![])).unwrap();
+                    self.data_tx
+                        .send((tile, vec![], vec![]))
+                        .expect("error sending data");
                 }
             }; // 'out
 
-            let mut status = self.state.lock().unwrap();
+            let mut status = self.state.lock().expect("error locking state");
 
             todo -= 1;
 
@@ -499,7 +524,7 @@ impl Processor {
                     Metric::Encode,
                     Instant::now().duration_since(top_instant),
                 ))
-                .unwrap();
+                .expect("error sending stats");
         }
     }
 }

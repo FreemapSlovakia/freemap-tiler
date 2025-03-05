@@ -1,4 +1,5 @@
 use crate::{
+    schema::create_schema,
     tile::Tile,
     time_track::{Metric, StatsMsg},
 };
@@ -18,6 +19,8 @@ pub fn new(
     let (data_tx, data_rx) = sync_channel::<(Tile, Vec<u8>, Vec<u8>)>(num_threads as usize * 16);
 
     let insert_conn = Connection::open(target_file).unwrap();
+
+    create_schema(&insert_conn, 20).unwrap();
 
     let insert_thread = thread::spawn(move || {
         let mut stmt = insert_conn

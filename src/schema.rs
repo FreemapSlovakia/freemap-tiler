@@ -25,28 +25,28 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
         (),
     )?;
 
+    // conn.execute(
+    //     "CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row)",
+    //     (),
+    // )?;
+
     conn.execute(
-        "CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row)",
+        "INSERT INTO metadata (name, value) VALUES ('name', 'Tiles')",
         (),
     )?;
 
     conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('name', 'Tiles');",
+        "INSERT INTO metadata (name, value) VALUES ('format', 'jpeg')",
         (),
     )?;
 
     conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('format', 'jpeg');",
+        "INSERT INTO metadata (name, value) VALUES ('minzoom', 0)",
         (),
     )?;
 
     conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('minzoom', 0);",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('maxzoom', ?1);",
+        "INSERT INTO metadata (name, value) VALUES ('maxzoom', ?1)",
         [max_zoom],
     )?;
 

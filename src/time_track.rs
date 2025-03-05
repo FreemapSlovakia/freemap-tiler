@@ -117,11 +117,10 @@ pub fn new(debug: bool) -> (Sender<StatsMsg>, JoinHandle<()>) {
                     if now.duration_since(last_log).as_secs() > 10 {
                         last_log = now;
 
-                        if debug {
-                            print!("\n");
-                        }
-
-                        println!("{pct:.2} % | {queue_len} | {tile} | {stats}");
+                        println!(
+                            "{}{pct:.2} % | {queue_len} | {tile} | {stats}",
+                            if debug { "\n" } else { "" }
+                        );
 
                         stats = TimeStats::default();
                     }

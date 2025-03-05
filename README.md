@@ -164,8 +164,6 @@ freemap-tiler \
    nice freemap-tiler --source-file vychod-with-mask.vrt --target-file vychod.mbtiles --max-zoom 19 --source-srs EPSG:8353 --jpeg-quality 85 --transform-pipeline "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=hgridshift +grids=Slovakia_JTSK03_to_JTSK.gsb +step +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=485.021 +y=169.465 +z=483.839 +rx=-7.786342 +ry=-4.397554 +rz=-4.102655 +s=0 +convention=coordinate_frame +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84"
    ```
 
-````
-
 ### Czech republic
 
 TODO
@@ -183,28 +181,28 @@ vychod-tileindex.gpkg \
 -sql "SELECT ST_Union(geom) AS geometry FROM 'index'" \
 -a_srs EPSG:5514
 
-ogr2ogr \
--f GPKG \
-result.gpkg \
-admin.gpkg \
--nln tiles \
--nlt POLYGON \
--dialect sqlite \
--sql "SELECT ST_Buffer(geom, 99.5, 16) AS geometry FROM administrative_units" \
--a_srs EPSG:5514
+(ogr2ogr
+-f GPKG
+result.gpkg
+admin.gpkg
+-nln tiles
+-nlt POLYGON
+-dialect sqlite
+-sql "SELECT ST_Buffer(geom, 99.5, 16) AS geometry FROM administrative_units"
+-a_srs EPSG:5514)
 
 ogr2ogr -f GPKG -update -append result.gpkg vychod-tileindex-dissolved.gpkg -nln dissolved
 
-ogr2ogr -f GPKG intersection.gpkg result.gpkg \
--dialect sqlite \
+(ogr2ogr -f GPKG intersection.gpkg result.gpkg
+-dialect sqlite
 -sql "
  SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
  FROM tiles a, dissolved b
  WHERE ST_Intersects(a.geometry, b.geometry)
-" \
--nln intersection \
--nlt POLYGON \
--a_srs EPSG:5514
+"
+-nln intersection
+-nlt POLYGON
+-a_srs EPSG:5514)
 
 gdalbuildvrt vychod.vrt new/*.jpg
 
@@ -221,13 +219,15 @@ $(gdalinfo -json vychod.vrt | jq -r '"-te \(.cornerCoordinates.upperLeft[0]) \(.
 -co BIGTIFF=YES \
 intersection.gpkg \
 vychod-alpha-mask.tif
-````
+```
 
 To get transformation pipeline: `projinfo -s EPSG:5514 -t EPSG:3857 --spatial-test intersects -o proj`
 
 ```sh
-nice cargo run --release -- --source-file /home/martin/14TB/CZ-ORTOFOTO/vychod/vychod.vrt --target-file /home/martin/14TB/CZ-ORTOFOTO/vychod/vychod-v6.mbtiles --max-zoom 20 --source-srs EPSG:5514 --jpeg-quality 85 --bounding-polygon /home/martin/14TB/CZ-ORTOFOTO/vychod/bounds.geojson --transform-pipeline "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=570.8 +y=85.7 +z=462.8 +rx=4.998 +ry=1.587 +rz=5.261 +s=3.56 +convention=position_vector +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84"
 
 reset; nice cargo run --release -- --source-file /home/martin/14TB/CZ-ORTOFOTO/vychod/vychod.vrt --target-file /home/martin/OSM/vychod-v6.mbtiles --max-zoom 20 --source-srs EPSG:5514 --jpeg-quality 85 --bounding-polygon /home/martin/14TB/CZ-ORTOFOTO/vychod/bounds.geojson --transform-pipeline "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=570.8 +y=85.7 +z=462.8 +rx=4.998 +ry=1.587 +rz=5.261 +s=3.56 +convention=position_vector +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84" --resume --debug
+
+zapad:
+reset; nice cargo run --release -- --source-file /home/martin/14TB/CZ-ORTOFOTO/zapad/data/all.vrt --target-file /home/martin/OSM/cz-zapad.mbtiles --max-zoom 20 --source-srs 'EPSG:5514' --jpeg-quality 85 --warp-zoom-offset 4 --bounding-polygon /home/martin/14TB/CZ-ORTOFOTO/zapad/bounds.geojson --transform-pipeline '+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=570.8 +y=85.7 +z=462.8 +rx=4.998 +ry=1.587 +rz=5.261 +s=3.56 +convention=position_vector +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84' --target-file2 /home/martin/OSM/cz-zapad.mbtiles
 
 ```

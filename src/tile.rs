@@ -59,7 +59,7 @@ impl Tile {
         tile
     }
 
-    pub fn get_sector_in_parent(&self, levels: u8) -> (u32, u32) {
+    pub const fn get_sector_in_parent(&self, levels: u8) -> (u32, u32) {
         (
             self.x & ((1_u32 << levels) - 1),
             self.y & ((1_u32 << levels) - 1),

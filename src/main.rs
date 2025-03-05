@@ -12,12 +12,12 @@ mod warp;
 
 use ::geo::Intersects;
 use args::Args;
-use bbox::{covered_tiles, BBox};
+use bbox::{BBox, covered_tiles};
 use clap::Parser;
 use crossbeam_deque::{Steal, Stealer, Worker};
 use gdal::{
-    spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
     Dataset,
+    spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
 };
 use geo::compute_bbox;
 use geojson::{parse_geojson_polygon, reproject_polygon};
@@ -58,16 +58,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_file = args.target_file.as_path();
 
-    {
-        let target_exists = target_file.exists();
-
-        if target_exists && !args.resume {
-            return Err("Target file exists".into());
-        }
-
-        if !target_exists && args.resume {
-            return Err("Can't resume - target doesn't exist".into());
-        }
+    if target_file.exists() && args.continue_file.is_none() {
+        return Err("Target file exists".into());
     }
 
     let num_threads = args.num_threads.unwrap_or_else(|| {
@@ -96,12 +88,38 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Expecting 4 bands".into());
     }
 
-    if !args.resume {
-        let conn =
-            Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
+    let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
 
-        create_schema(&conn, 19).map_err(|e| format!("Error initializing schema: {e}"))?;
+    if args.continue_file.is_none() || args.continue_file.as_deref() == Some(target_file) {
+        create_schema(&conn, args.max_zoom)
+            .map_err(|e| format!("Error initializing schema: {e}"))?;
     }
+
+    // // delete a tile and parents
+    // {
+    //     let conn =
+    //         Connection::open(target_file).map_err(|e| format!("Error opening output: {e}"))?;
+
+    //     let mut tile = Tile {
+    //         zoom: 20,
+    //         x: 569618,
+    //         y: 360443,
+    //     };
+
+    //     loop {
+    //         conn.execute(
+    //             "DELETE FROM tiles WHERE zoom_level = ?1 AND tile_column = ?2 AND tile_row = ?3",
+    //             (tile.zoom, tile.x, tile.reversed_y()),
+    //         )
+    //         .map_err(|e| format!("Error inserting limits: {e}"))?;
+
+    //         let Some(parent) = tile.get_parent() else {
+    //             break;
+    //         };
+
+    //         tile = parent;
+    //     }
+    // }
 
     let source_srs = args.source_srs.as_deref().map_or_else(
         || {
@@ -149,7 +167,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .par_bridge()
     .filter(|tile| {
-        bounding_polygon.map_or(true, |bounding_polygon| {
+        bounding_polygon.is_none_or(|bounding_polygon| {
             tile.bounds_to_epsg3857(args.tile_size)
                 .to_polygon()
                 .intersects(bounding_polygon)
@@ -235,10 +253,9 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let processor = &Processor::new(
-            args.resume,
             args.tile_size,
             args.max_zoom,
-            target_file,
+            args.continue_file.as_deref(),
             stats_tx,
             args.debug,
             &args.source_file,
@@ -249,6 +266,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             pending_set,
             tiles,
             args.warp_zoom_offset,
+            args.insert_empty,
         );
 
         println!("Generating tiles");
@@ -291,7 +309,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_string(&*limits).expect("Error serializing limits")
     };
 
-    let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
+    let conn =
+        Connection::open(args.target_file).map_err(|e| format!("Error creating output: {e}"))?;
 
     conn.execute(
         "INSERT INTO metadata (name, value) VALUES ('limits', ?1)",
