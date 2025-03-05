@@ -53,6 +53,6 @@ pub struct Args {
     pub debug: bool,
 
     /// Insert empty
-    #[arg(action = ArgAction::Set, default_value_t = true, default_missing_value = "true", num_args = 0..=1, require_equals = false)]
+    #[arg(long, action = ArgAction::Set, default_value_t = true, default_missing_value = "true", num_args = 0..=1, require_equals = false)]
     pub insert_empty: bool,
 }
