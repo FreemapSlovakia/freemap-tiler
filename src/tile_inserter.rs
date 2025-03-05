@@ -1,5 +1,4 @@
 use crate::{
-    schema::create_schema,
     tile::Tile,
     time_track::{Metric, StatsMsg},
 };
