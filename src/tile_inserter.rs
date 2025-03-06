@@ -19,6 +19,14 @@ pub fn new(
 
     let insert_conn = Connection::open(target_file).unwrap();
 
+    insert_conn
+        .pragma_update(None, "synchronous", "OFF")
+        .unwrap();
+
+    insert_conn
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+
     let insert_thread = thread::spawn(move || {
         let mut stmt = insert_conn
           .prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data, tile_alpha) VALUES (?1, ?2, ?3, ?4, ?5)")

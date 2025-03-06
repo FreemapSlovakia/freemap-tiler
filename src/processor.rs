@@ -1,7 +1,7 @@
 use crossbeam_deque::Worker;
 use gdal::{Dataset, DriverManager};
 use image::{ImageDecoder, RgbaImage, codecs::jpeg::JpegDecoder, imageops::FilterType};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::{HashMap, HashSet},
     io::{Cursor, Write},
@@ -72,7 +72,8 @@ impl Processor {
 
         let select_conn = continue_file.map(|continue_file| {
             Arc::new(Mutex::new(
-                Connection::open(continue_file).expect("error opening continue mbtiles connection"),
+                Connection::open_with_flags(continue_file, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .expect("error opening continue mbtiles connection"),
             ))
         });
 
@@ -378,7 +379,7 @@ impl Processor {
                                 Metric::Warp,
                                 Instant::now().duration_since(warp_instant),
                             ))
-                            .expect("errro sending stats");
+                            .expect("error sending stats");
 
                         megatile = Some(megatile1);
 
