@@ -249,7 +249,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (stats_tx, stats_collector_thread) = time_track::new(args.debug);
 
-    let (insert_thread, data_tx) = tile_inserter::new(target_file, num_threads, stats_tx.clone());
+    let (insert_thread, data_tx) = tile_inserter::new(target_file, num_threads, stats_tx.clone())?;
 
     {
         let processor = &Processor::new(
