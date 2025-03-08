@@ -1,4 +1,5 @@
 use crate::{
+    schema::create_schema,
     tile::Tile,
     time_track::{Metric, StatsMsg},
 };
@@ -12,19 +13,24 @@ use std::{
 
 pub fn new(
     target_file: &Path,
+    max_zoom: Option<u8>,
     num_threads: u16,
     stats_tx: Sender<StatsMsg>,
 ) -> rusqlite::Result<(JoinHandle<()>, SyncSender<(Tile, Vec<u8>, Vec<u8>)>)> {
     let (data_tx, data_rx) = sync_channel::<(Tile, Vec<u8>, Vec<u8>)>(num_threads as usize * 16);
 
-    let insert_conn = Connection::open(target_file)?;
+    let conn = Connection::open(target_file)?;
 
-    insert_conn.pragma_update(None, "synchronous", "OFF")?;
+    if let Some(max_zoom) = max_zoom {
+        create_schema(&conn, max_zoom)?;
+    }
 
-    insert_conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "OFF")?;
+
+    conn.pragma_update(None, "journal_mode", "WAL")?;
 
     let insert_thread = thread::spawn(move || {
-        let mut stmt = insert_conn
+        let mut stmt = conn
           .prepare("INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data, tile_alpha) VALUES (?1, ?2, ?3, ?4, ?5)")
           .expect("Error preparing insert statement");
 

@@ -24,7 +24,6 @@ use geojson::{parse_geojson_polygon, reproject_polygon};
 use processor::Processor;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use rusqlite::Connection;
-use schema::create_schema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -86,13 +85,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     if band_count != 4 {
         return Err("Expecting 4 bands".into());
-    }
-
-    let conn = Connection::open(target_file).map_err(|e| format!("Error creating output: {e}"))?;
-
-    if args.continue_file.is_none() || args.continue_file.as_deref() == Some(target_file) {
-        create_schema(&conn, args.max_zoom)
-            .map_err(|e| format!("Error initializing schema: {e}"))?;
     }
 
     // // delete a tile and parents
@@ -249,7 +241,16 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (stats_tx, stats_collector_thread) = time_track::new(args.debug);
 
-    let (insert_thread, data_tx) = tile_inserter::new(target_file, num_threads, stats_tx.clone())?;
+    let (insert_thread, data_tx) = tile_inserter::new(
+        target_file,
+        if args.continue_file.is_none() || args.continue_file.as_deref() != Some(target_file) {
+            Some(args.max_zoom)
+        } else {
+            None
+        },
+        num_threads,
+        stats_tx.clone(),
+    )?;
 
     {
         let processor = &Processor::new(
