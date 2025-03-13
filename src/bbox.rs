@@ -16,13 +16,16 @@ pub struct TileIterator {
     min_tile_x: u32,
     max_tile_x: u32,
     max_tile_y: u32,
+    init: bool,
 }
 
 impl Iterator for TileIterator {
     type Item = Tile;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.x > self.max_tile_x {
+        if self.init {
+            self.init = false;
+        } else if self.x > self.max_tile_x {
             self.x = self.min_tile_x;
 
             self.y += 1;
@@ -73,5 +76,6 @@ pub fn covered_tiles(bbox: &BBox, zoom: u8) -> TileIterator {
         min_tile_x,
         max_tile_x,
         max_tile_y,
+        init: true,
     }
 }
