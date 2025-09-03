@@ -250,6 +250,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         },
         num_threads,
         stats_tx.clone(),
+        args.format,
     )?;
 
     {
@@ -268,6 +269,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             tiles,
             args.warp_zoom_offset,
             args.insert_empty,
+            args.format,
         );
 
         println!("Generating tiles");

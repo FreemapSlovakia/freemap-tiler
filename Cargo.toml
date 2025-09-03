@@ -1,6 +1,6 @@
 [package]
 name = "freemap-tiler"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -8,7 +8,10 @@ clap = { version = "4.5.47", features = ["derive"] }
 crossbeam-deque = { version = "0.8.4" }
 gdal = { version = "0.18.0", features = ["bindgen"] }
 gdal-sys = "0.11.0"
-image = { version = "0.25.6", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.6", default-features = false, features = [
+  "jpeg",
+  "png",
+] }
 jpeg-encoder = "0.6.1"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 zstd = "0.13.3"

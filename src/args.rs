@@ -1,5 +1,14 @@
 use clap::{ArgAction, Parser};
+use serde::Serialize;
 use std::path::PathBuf;
+
+#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    #[default]
+    JPEG,
+    PNG,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -39,6 +48,9 @@ pub struct Args {
     /// Number of threads for parallel processing [default: available parallelism]
     #[arg(long)]
     pub num_threads: Option<u16>,
+
+    #[arg(long, default_value_t, value_enum)]
+    pub format: Format,
 
     /// JPEG quality
     #[arg(long, default_value_t = 85)]

@@ -1,6 +1,10 @@
 use crossbeam_deque::Worker;
 use gdal::{Dataset, DriverManager};
-use image::{ImageDecoder, RgbaImage, codecs::jpeg::JpegDecoder, imageops::FilterType};
+use image::{
+    ImageDecoder, ImageEncoder, RgbaImage,
+    codecs::{jpeg::JpegDecoder, png::PngEncoder},
+    imageops::FilterType,
+};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::{HashMap, HashSet},
@@ -16,6 +20,7 @@ use std::{
 
 use crate::{
     Limits,
+    args::Format,
     state::State,
     tile::Tile,
     time_track::{Metric, StatsMsg},
@@ -41,6 +46,7 @@ pub struct Processor {
     data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
     zoom_offset: u8,
     insert_empty: bool,
+    format: Format,
 }
 
 const BAND_COUNT: usize = 4;
@@ -61,6 +67,7 @@ impl Processor {
         pending_vec: Vec<Tile>,
         zoom_offset: u8,
         insert_empty: bool,
+        format: Format,
     ) -> Self {
         let total = pending_set.len();
 
@@ -95,6 +102,7 @@ impl Processor {
             data_tx,
             zoom_offset,
             insert_empty,
+            format,
         }
     }
 
@@ -421,51 +429,73 @@ impl Processor {
                 if let Some(rgba) = rgba {
                     steps.push('●');
 
-                    // produces bigger jpegs
-                    // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
-                    //     .write_image(
-                    //         &out_buffer,
-                    //         tile_size as u32,
-                    //         tile_size as u32,
-                    //         image::ExtendedColorType::Rgb8,
-                    //     )
-                    //     .expect("Failed to encode JPEG");
-
-                    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-
-                    let mut alpha = Vec::with_capacity(rgba.len() / 4);
-
-                    let mut is_full = true;
-
-                    for chunk in rgba.chunks_exact(4) {
-                        rgb.extend_from_slice(&chunk[0..3]);
-
-                        alpha.push(chunk[3]);
-
-                        is_full = is_full && chunk[3] == 255;
-                    }
-
-                    let mut alpha_enc = Vec::new();
-
-                    if !is_full {
-                        let mut encoder = zstd::Encoder::new(&mut alpha_enc, 0)
-                            .expect("error creating zstd encoder");
-
-                        encoder.write_all(&alpha).expect("error zstd encoding");
-
-                        encoder.finish().expect("error finishing zstd encoding");
-                    }
-
                     let mut rgb_enc = Vec::new();
 
-                    jpeg_encoder::Encoder::new(&mut rgb_enc, self.jpeg_quality)
-                        .encode(
-                            &rgb,
-                            self.tile_size,
-                            self.tile_size,
-                            jpeg_encoder::ColorType::Rgb,
-                        )
-                        .expect("Failed to encode JPEG");
+                    let alpha_enc = match self.format {
+                        Format::JPEG => {
+                            // produces bigger jpegs
+                            // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
+                            //     .write_image(
+                            //         &out_buffer,
+                            //         tile_size as u32,
+                            //         tile_size as u32,
+                            //         image::ExtendedColorType::Rgb8,
+                            //     )
+                            //     .expect("Failed to encode JPEG");
+
+                            let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+
+                            let mut alpha = Vec::with_capacity(rgba.len() / 4);
+
+                            let mut is_full = true;
+
+                            for chunk in rgba.chunks_exact(4) {
+                                rgb.extend_from_slice(&chunk[0..3]);
+
+                                alpha.push(chunk[3]);
+
+                                is_full = is_full && chunk[3] == 255;
+                            }
+
+                            let mut alpha_enc = Vec::new();
+
+                            if !is_full {
+                                let mut encoder = zstd::Encoder::new(&mut alpha_enc, 0)
+                                    .expect("error creating zstd encoder");
+
+                                encoder.write_all(&alpha).expect("error zstd encoding");
+
+                                encoder.finish().expect("error finishing zstd encoding");
+                            }
+
+                            jpeg_encoder::Encoder::new(&mut rgb_enc, self.jpeg_quality)
+                                .encode(
+                                    &rgb,
+                                    self.tile_size,
+                                    self.tile_size,
+                                    jpeg_encoder::ColorType::Rgb,
+                                )
+                                .expect("JPEG encoded");
+
+                            alpha_enc
+                        }
+                        Format::PNG => {
+                            PngEncoder::new_with_quality(
+                                &mut rgb_enc,
+                                image::codecs::png::CompressionType::Best,
+                                image::codecs::png::FilterType::Adaptive,
+                            )
+                            .write_image(
+                                &rgba,
+                                self.tile_size as u32,
+                                self.tile_size as u32,
+                                image::ExtendedColorType::Rgba8,
+                            )
+                            .expect("PNG encoded");
+
+                            vec![]
+                        }
+                    };
 
                     // println!("Inserting {tile}");
 

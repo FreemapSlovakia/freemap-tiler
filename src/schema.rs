@@ -1,6 +1,8 @@
 use rusqlite::{Connection, Error};
 
-pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
+use crate::args::Format;
+
+pub fn create_schema(conn: &Connection, max_zoom: u8, format: Format) -> Result<(), Error> {
     conn.execute(
         "CREATE TABLE metadata (
           name TEXT NOT NULL,
@@ -11,13 +13,19 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
     )?;
 
     conn.execute(
-        "CREATE TABLE tiles (
+        &format!(
+            "CREATE TABLE tiles (
           zoom_level INTEGER NOT NULL,
           tile_column INTEGER NOT NULL,
           tile_row INTEGER NOT NULL,
-          tile_data BLOB NOT NULL,
-          tile_alpha BLOB NOT NULL
+          tile_data BLOB NOT NULL
+          {:?}
         )",
+            match format {
+                Format::JPEG => ", tile_alpha BLOB NOT NULL",
+                Format::PNG => "",
+            }
+        ),
         (),
     )?;
 
@@ -32,8 +40,11 @@ pub fn create_schema(conn: &Connection, max_zoom: u8) -> Result<(), Error> {
     )?;
 
     conn.execute(
-        "INSERT INTO metadata (name, value) VALUES ('format', 'jpeg')",
-        (),
+        "INSERT INTO metadata (name, value) VALUES ('format', ?1)",
+        [match format {
+            Format::JPEG => "jpeg",
+            Format::PNG => "png",
+        }],
     )?;
 
     conn.execute(
