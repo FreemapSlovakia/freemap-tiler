@@ -38,8 +38,8 @@ impl Tile {
             None
         } else {
             Some(Self {
-                x: self.x / 2,
-                y: self.y / 2,
+                x: self.x >> 1,
+                y: self.y >> 1,
                 zoom: self.zoom - 1,
             })
         }
@@ -71,23 +71,23 @@ impl Tile {
 
         [
             Self {
-                x: self.x * 2,
-                y: self.y * 2,
+                x: self.x << 1,
+                y: self.y << 1,
                 zoom,
             },
             Self {
-                x: self.x * 2 + 1,
-                y: self.y * 2,
+                x: self.x << 1 + 1,
+                y: self.y << 1,
                 zoom,
             },
             Self {
-                x: self.x * 2,
-                y: self.y * 2 + 1,
+                x: self.x << 1,
+                y: self.y << 1 + 1,
                 zoom,
             },
             Self {
-                x: self.x * 2 + 1,
-                y: self.y * 2 + 1,
+                x: self.x << 1 + 1,
+                y: self.y << 1 + 1,
                 zoom,
             },
         ]
@@ -101,7 +101,7 @@ impl Tile {
         let mut result = 0u64;
 
         for i in 0..32 {
-            result |= ((u64::from(v) >> i) & 1) << (2 * i);
+            result |= ((u64::from(v) >> i) & 1) << (i << 1);
         }
 
         result

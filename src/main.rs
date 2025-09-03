@@ -174,21 +174,24 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Preparing queues");
 
     let mut pending_set: HashSet<_> = tiles.iter().copied().collect();
-    let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
-    let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
 
-    while let Some(tile) = todo_dq.pop_front() {
-        todo_set.remove(&tile);
+    {
+        let mut todo_set: HashSet<_> = tiles.iter().copied().collect();
+        let mut todo_dq: VecDeque<_> = tiles.iter().copied().collect();
 
-        if tile.zoom == 0 {
-            continue;
-        }
+        while let Some(tile) = todo_dq.pop_front() {
+            todo_set.remove(&tile);
 
-        if let Some(parent_tile) = tile.get_parent() {
-            if todo_set.insert(parent_tile) {
-                todo_dq.push_back(parent_tile);
+            if tile.zoom == 0 {
+                continue;
+            }
 
-                pending_set.insert(parent_tile);
+            if let Some(parent_tile) = tile.get_parent() {
+                if todo_set.insert(parent_tile) {
+                    todo_dq.push_back(parent_tile);
+
+                    pending_set.insert(parent_tile);
+                }
             }
         }
     }

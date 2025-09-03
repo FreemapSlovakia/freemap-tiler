@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 pub struct State {
     pending_set: HashSet<Tile>,
-    processed_set: HashSet<Tile>,
+    processed_set: HashSet<Tile>, // finished
     waiting_set: HashSet<Tile>,
     pending_vec: Vec<Tile>,
     max_zoom: u8,
@@ -27,26 +27,28 @@ impl State {
         }
     }
 
-    pub fn next(&mut self, tile: Tile, next: bool) -> Option<Vec<Tile>> {
+    pub fn processed(&mut self, tile: Tile) {
         self.pending_set.remove(&tile);
         self.waiting_set.remove(&tile);
         self.processed_set.insert(tile);
 
-        if let Some(parent) = tile.get_parent() {
-            if !self.waiting_set.contains(&parent) && !self.processed_set.contains(&parent) {
-                let children = parent.get_children();
+        let Some(parent) = tile.get_parent() else {
+            return;
+        };
 
-                if children.iter().all(|tile| !self.pending_set.contains(tile)) {
-                    self.pending_vec.push(parent);
-                    self.waiting_set.insert(parent);
-                }
-            }
+        if self.waiting_set.contains(&parent) || self.processed_set.contains(&parent) {
+            return;
         }
 
-        if !next {
-            return None;
-        }
+        let children = parent.get_children();
 
+        if children.iter().all(|tile| !self.pending_set.contains(tile)) {
+            self.pending_vec.push(parent);
+            self.waiting_set.insert(parent);
+        }
+    }
+
+    pub fn next(&mut self) -> Option<Vec<Tile>> {
         let mut tiles = Vec::with_capacity(1);
 
         let mut key: Option<Tile> = None;

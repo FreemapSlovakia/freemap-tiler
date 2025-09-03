@@ -540,8 +540,12 @@ impl Processor {
 
             todo -= 1;
 
-            if let Some(tiles) = status.next(tile, todo == 0) {
-                worker.push(tiles);
+            status.processed(tile);
+
+            if todo == 0 {
+                if let Some(tiles) = status.next() {
+                    worker.push(tiles);
+                }
             }
 
             drop(status);
