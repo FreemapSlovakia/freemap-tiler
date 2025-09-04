@@ -22,11 +22,11 @@ use crate::{
     Limits,
     args::Format,
     state::State,
-    tile::Tile,
     time_track::{Metric, StatsMsg},
     warp::{self, Transform},
 };
 use std::sync::Arc;
+use tilemath::Tile;
 
 pub struct Processor {
     buffer_cache: Arc<Mutex<HashMap<Tile, Vec<u8>>>>,
@@ -169,7 +169,7 @@ impl Processor {
                         };
 
                         if tile.zoom < self.max_zoom {
-                            let children = tile.get_children();
+                            let children = tile.children();
 
                             let mut buffer_cache = self
                                 .buffer_cache
@@ -233,7 +233,7 @@ impl Processor {
 
                     let mut has_data = false;
 
-                    let children = tile.get_children();
+                    let children = tile.children();
 
                     let sectors: Vec<_> = {
                         let mut buffer_cache = self
@@ -318,9 +318,9 @@ impl Processor {
                         let warp_instant = Instant::now();
 
                         let bbox = tile
-                            .get_ancestor(self.zoom_offset)
+                            .ancestor(self.zoom_offset)
                             .expect("error getting tile ancestor") // TODO
-                            .bounds_to_epsg3857(mega_size);
+                            .bounds(mega_size);
 
                         fn get_buffers(ds: &Dataset, mega_size: usize) -> Vec<Buffer<u8>> {
                             (1..=BAND_COUNT)
@@ -401,7 +401,7 @@ impl Processor {
                         megatile.as_ref().expect("megatile is missing")
                     };
 
-                    let (sx, sy) = tile.get_sector_in_parent(self.zoom_offset);
+                    let (sx, sy) = tile.sector_in_ancestor(self.zoom_offset);
 
                     let mut out_buffer =
                         vec![0u8; self.tile_size as usize * self.tile_size as usize * BAND_COUNT];

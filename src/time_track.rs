@@ -1,10 +1,10 @@
-use crate::tile::Tile;
 use std::{
     fmt::{self, Display, Formatter},
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use tilemath::Tile;
 
 pub enum StatsMsg {
     Duration(Metric, Duration),

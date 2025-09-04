@@ -1,5 +1,5 @@
-use crate::tile::Tile;
 use std::collections::HashSet;
+use tilemath::Tile;
 
 pub struct State {
     pending_set: HashSet<Tile>,
@@ -32,7 +32,7 @@ impl State {
         self.waiting_set.remove(&tile);
         self.processed_set.insert(tile);
 
-        let Some(parent) = tile.get_parent() else {
+        let Some(parent) = tile.parent() else {
             return;
         };
 
@@ -40,7 +40,7 @@ impl State {
             return;
         }
 
-        let children = parent.get_children();
+        let children = parent.children();
 
         if children.iter().all(|tile| !self.pending_set.contains(tile)) {
             self.pending_vec.push(parent);
@@ -60,7 +60,7 @@ impl State {
                 break;
             }
 
-            let curr_key = tile.get_ancestor(self.zoom_offset);
+            let curr_key = tile.ancestor(self.zoom_offset);
 
             let Some(curr_key) = curr_key else {
                 tiles.push(tile);

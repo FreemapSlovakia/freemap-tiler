@@ -1,18 +1,15 @@
 mod args;
-mod bbox;
 mod geo;
 mod geojson;
 mod processor;
 mod schema;
 mod state;
-mod tile;
 mod tile_inserter;
 mod time_track;
 mod warp;
 
-use ::geo::Intersects;
+use ::geo::{Intersects, LineString, Polygon};
 use args::Args;
-use bbox::{BBox, covered_tiles};
 use clap::Parser;
 use crossbeam_deque::{Steal, Stealer, Worker};
 use gdal::{
@@ -31,7 +28,7 @@ use std::{
     sync::{Arc, Mutex},
     thread::{self, available_parallelism},
 };
-use tile::Tile;
+use tilemath::{BBox, Tile, bbox_covered_tiles};
 use warp::Transform;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -152,7 +149,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bounding_polygon = bounding_polygon.as_ref();
 
-    let mut tiles: Vec<_> = covered_tiles(
+    let mut tiles: Vec<_> = bbox_covered_tiles(
         &BBox {
             min_x: trans[0],
             max_x: trans[2],
@@ -164,9 +161,19 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     .par_bridge()
     .filter(|tile| {
         bounding_polygon.is_none_or(|bounding_polygon| {
-            tile.bounds_to_epsg3857(args.tile_size)
-                .to_polygon()
-                .intersects(bounding_polygon)
+            let bounds = tile.bounds(args.tile_size);
+
+            Polygon::new(
+                LineString::from(vec![
+                    (bounds.min_x, bounds.min_y),
+                    (bounds.max_x, bounds.min_y),
+                    (bounds.max_x, bounds.max_y),
+                    (bounds.min_x, bounds.max_y),
+                    (bounds.min_x, bounds.min_y),
+                ]),
+                vec![],
+            )
+            .intersects(bounding_polygon)
         })
     })
     .collect();
@@ -190,7 +197,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            if let Some(parent_tile) = tile.get_parent() {
+            if let Some(parent_tile) = tile.parent() {
                 if todo_set.insert(parent_tile) {
                     todo_dq.push_back(parent_tile);
 
@@ -217,7 +224,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
                 break 'outer;
             };
 
-            let curr_key = tile.get_ancestor(args.warp_zoom_offset);
+            let curr_key = tile.ancestor(args.warp_zoom_offset);
 
             let Some(curr_key) = curr_key else {
                 // no parent

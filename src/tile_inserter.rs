@@ -1,7 +1,6 @@
 use crate::{
     args::Format,
     schema::create_schema,
-    tile::Tile,
     time_track::{Metric, StatsMsg},
 };
 use rusqlite::Connection;
@@ -11,6 +10,7 @@ use std::{
     thread::{self, JoinHandle},
     time::Instant,
 };
+use tilemath::Tile;
 
 pub fn new(
     target_file: &Path,

@@ -22,6 +22,7 @@ geojson = "0.24.2"
 proj = "0.31.0"
 rayon = "1.11.0"
 signal-hook = "0.3.18"
+tilemath = "0.3.0"
 
 [profile.release]
 panic = 'abort'
