@@ -19,7 +19,7 @@ pub fn create_schema(conn: &Connection, max_zoom: u8, format: Format) -> Result<
           tile_column INTEGER NOT NULL,
           tile_row INTEGER NOT NULL,
           tile_data BLOB NOT NULL
-          {:?}
+          {}
         )",
             match format {
                 Format::JPEG => ", tile_alpha BLOB NOT NULL",

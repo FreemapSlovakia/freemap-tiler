@@ -134,9 +134,11 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let transform = if let Some(ref pipeline) = args.transform_pipeline {
         options.set_coordinate_operation(pipeline, false)?;
 
-        Transform::Pipeline(pipeline.to_string())
+        Some(Transform::Pipeline(pipeline.to_string()))
+    } else if source_srs == target_srs {
+        None
     } else {
-        Transform::Srs(source_srs.to_wkt()?, target_srs.to_wkt()?)
+        Some(Transform::Srs(source_srs.to_wkt()?, target_srs.to_wkt()?))
     };
 
     println!("Computing tile coverage");
@@ -145,6 +147,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to create coordinate transform: {e}"))?
         .transform_bounds(&[bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y], 21)
         .map_err(|e| format!("Error transforming bounds: {e}"))?;
+
+    println!("TRANS {:?}", trans);
 
     let bounding_polygon = bounding_polygon.as_ref();
 

@@ -1,5 +1,5 @@
 use crossbeam_deque::Worker;
-use gdal::{Dataset, DriverManager};
+use gdal::{Dataset, DriverManager, raster::Buffer};
 use image::{
     ImageDecoder, ImageEncoder, RgbaImage,
     codecs::{jpeg::JpegDecoder, png::PngEncoder},
@@ -40,7 +40,7 @@ pub struct Processor {
     debug: bool,
     source_file: PathBuf,
     state: Arc<Mutex<State>>,
-    transform: Transform,
+    transform: Option<Transform>,
     jpeg_quality: u8,
     limits: Arc<Mutex<HashMap<u8, Limits>>>,
     data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
@@ -59,7 +59,7 @@ impl Processor {
         stats_tx: Sender<StatsMsg>,
         debug: bool,
         source_file: &Path,
-        transform: Transform,
+        transform: Option<Transform>,
         jpeg_quality: u8,
         limits: Arc<Mutex<HashMap<u8, Limits>>>,
         data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
@@ -322,50 +322,57 @@ impl Processor {
                             .expect("error getting tile ancestor") // TODO
                             .bounds_to_epsg3857(mega_size);
 
-                        let mut target_ds = DriverManager::get_driver_by_name("MEM")
-                            .expect("Failed to get MEM driver")
-                            .create(
-                                "",
-                                (self.tile_size as usize) << self.zoom_offset,
-                                (self.tile_size as usize) << self.zoom_offset,
-                                BAND_COUNT,
-                            )
-                            .expect("Failed to create target dataset");
+                        fn get_buffers(ds: &Dataset, mega_size: usize) -> Vec<Buffer<u8>> {
+                            (1..=BAND_COUNT)
+                                .map(|band| {
+                                    ds.rasterband(band)
+                                        .expect("error getting raster band")
+                                        .read_as::<u8>(
+                                            (0, 0),
+                                            (mega_size, mega_size),
+                                            (mega_size, mega_size),
+                                            None,
+                                        )
+                                        .expect("error reading from band")
+                                })
+                                .collect()
+                        }
 
-                        target_ds
-                            .set_geo_transform(&[
-                                bbox.min_x,                                          // Top-left x
-                                (bbox.max_x - bbox.min_x) / f64::from(mega_size),    // Pixel width
-                                0.0,        // Rotation (x-axis)
-                                bbox.max_y, // Top-left y
-                                0.0,        // Rotation (y-axis)
-                                -((bbox.max_y - bbox.min_y) / f64::from(mega_size)), // Pixel height (negative for top-down)
-                            ])
-                            .expect("error setting geo transform");
+                        let buffers = if let Some(transform) = &self.transform {
+                            let mut target_ds = DriverManager::get_driver_by_name("MEM")
+                                .expect("Failed to get MEM driver")
+                                .create(
+                                    "",
+                                    (self.tile_size as usize) << self.zoom_offset,
+                                    (self.tile_size as usize) << self.zoom_offset,
+                                    BAND_COUNT,
+                                )
+                                .expect("Failed to create target dataset");
 
-                        steps.push('W');
+                            target_ds
+                                .set_geo_transform(&[
+                                    bbox.min_x,                                          // Top-left x
+                                    (bbox.max_x - bbox.min_x) / f64::from(mega_size), // Pixel width
+                                    0.0,        // Rotation (x-axis)
+                                    bbox.max_y, // Top-left y
+                                    0.0,        // Rotation (y-axis)
+                                    -((bbox.max_y - bbox.min_y) / f64::from(mega_size)), // Pixel height (negative for top-down)
+                                ])
+                                .expect("error setting geo transform");
 
-                        warp::warp(&source_ds, &target_ds, mega_size, &self.transform);
+                            steps.push('W');
+
+                            warp::warp(&source_ds, &target_ds, mega_size, &transform);
+
+                            get_buffers(&target_ds, mega_size as usize)
+                        } else {
+                            get_buffers(&source_ds, mega_size as usize)
+                        };
 
                         self.pool
                             .lock()
-                            .expect("error loging dataset pool")
+                            .expect("error locking dataset pool")
                             .push(source_ds);
-
-                        let buffers: Vec<_> = (1..=BAND_COUNT)
-                            .map(|band| {
-                                target_ds
-                                    .rasterband(band)
-                                    .expect("error getting raster band")
-                                    .read_as::<u8>(
-                                        (0, 0),
-                                        (mega_size as usize, mega_size as usize),
-                                        (mega_size as usize, mega_size as usize),
-                                        None,
-                                    )
-                                    .expect("error reading from band")
-                            })
-                            .collect();
 
                         let mut megatile1 =
                             vec![0u8; ((mega_size as usize) * (mega_size as usize)) * BAND_COUNT];
@@ -492,6 +499,8 @@ impl Processor {
                                 image::ExtendedColorType::Rgba8,
                             )
                             .expect("PNG encoded");
+
+                            println!("PP {}", rgb_enc.len());
 
                             vec![]
                         }

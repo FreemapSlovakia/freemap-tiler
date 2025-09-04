@@ -8,7 +8,7 @@ clap = { version = "4.5.47", features = ["derive"] }
 crossbeam-deque = { version = "0.8.4" }
 gdal = { version = "0.18.0", features = ["bindgen"] }
 gdal-sys = "0.11.0"
-image = { version = "0.25.6", default-features = false, features = [
+image = { version = "0.25.8", default-features = false, features = [
   "jpeg",
   "png",
 ] }
