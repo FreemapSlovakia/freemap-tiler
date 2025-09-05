@@ -1,11 +1,19 @@
+use crate::{
+    Limits,
+    args::Format,
+    state::State,
+    time_track::{Metric, StatsMsg},
+    warp::{self, Transform},
+};
 use crossbeam_deque::Worker;
-use gdal::{Dataset, DriverManager, raster::Buffer};
+use gdal::{Dataset, DriverManager, raster::ColorInterpretation};
 use image::{
     ImageDecoder, ImageEncoder, RgbaImage,
     codecs::{jpeg::JpegDecoder, png::PngEncoder},
     imageops::FilterType,
 };
 use rusqlite::{Connection, OpenFlags};
+use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
     io::{Cursor, Write},
@@ -17,15 +25,6 @@ use std::{
     },
     time::Instant,
 };
-
-use crate::{
-    Limits,
-    args::Format,
-    state::State,
-    time_track::{Metric, StatsMsg},
-    warp::{self, Transform},
-};
-use std::sync::Arc;
 use tilemath::Tile;
 
 pub struct Processor {
@@ -40,7 +39,7 @@ pub struct Processor {
     debug: bool,
     source_file: PathBuf,
     state: Arc<Mutex<State>>,
-    transform: Option<Transform>,
+    transform: Transform,
     jpeg_quality: u8,
     limits: Arc<Mutex<HashMap<u8, Limits>>>,
     data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
@@ -59,7 +58,7 @@ impl Processor {
         stats_tx: Sender<StatsMsg>,
         debug: bool,
         source_file: &Path,
-        transform: Option<Transform>,
+        transform: Transform,
         jpeg_quality: u8,
         limits: Arc<Mutex<HashMap<u8, Limits>>>,
         data_tx: SyncSender<(Tile, Vec<u8>, Vec<u8>)>,
@@ -139,11 +138,11 @@ impl Processor {
 
                             let mut stmt = conn
                                 .prepare("SELECT tile_data, tile_alpha FROM tiles WHERE zoom_level = ?1 AND tile_column = ?2 AND tile_row = ?3")
-                                .expect("error preparing select statement");
+                                .expect("select statement should be prepared");
 
                             let mut rows = stmt
                                 .query((tile.zoom, tile.x, tile.reversed_y()))
-                                .expect("error querying tile");
+                                .expect("tile should be queried");
 
                             let Some(row) = rows.next().expect("error getting selected tile")
                             else {
@@ -322,52 +321,60 @@ impl Processor {
                             .expect("error getting tile ancestor") // TODO
                             .bounds(mega_size);
 
-                        fn get_buffers(ds: &Dataset, mega_size: usize) -> Vec<Buffer<u8>> {
-                            (1..=BAND_COUNT)
-                                .map(|band| {
-                                    ds.rasterband(band)
-                                        .expect("error getting raster band")
-                                        .read_as::<u8>(
-                                            (0, 0),
-                                            (mega_size, mega_size),
-                                            (mega_size, mega_size),
-                                            None,
-                                        )
-                                        .expect("error reading from band")
-                                })
-                                .collect()
+                        let mut target_ds = DriverManager::get_driver_by_name("MEM")
+                            .expect("MEM driver should be obtained")
+                            .create(
+                                "",
+                                (self.tile_size as usize) << self.zoom_offset,
+                                (self.tile_size as usize) << self.zoom_offset,
+                                BAND_COUNT,
+                            )
+                            .expect("Failed to create target dataset");
+
+                        for (i, color) in vec![
+                            ColorInterpretation::RedBand,
+                            ColorInterpretation::GreenBand,
+                            ColorInterpretation::BlueBand,
+                            ColorInterpretation::AlphaBand,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            target_ds
+                                .rasterband(i + 1)
+                                .unwrap()
+                                .set_color_interpretation(color)
+                                .unwrap();
                         }
 
-                        let buffers = if let Some(transform) = &self.transform {
-                            let mut target_ds = DriverManager::get_driver_by_name("MEM")
-                                .expect("Failed to get MEM driver")
-                                .create(
-                                    "",
-                                    (self.tile_size as usize) << self.zoom_offset,
-                                    (self.tile_size as usize) << self.zoom_offset,
-                                    BAND_COUNT,
-                                )
-                                .expect("Failed to create target dataset");
+                        target_ds
+                            .set_geo_transform(&[
+                                bbox.min_x,                                          // Top-left x
+                                (bbox.max_x - bbox.min_x) / f64::from(mega_size),    // Pixel width
+                                0.0,        // Rotation (x-axis)
+                                bbox.max_y, // Top-left y
+                                0.0,        // Rotation (y-axis)
+                                -((bbox.max_y - bbox.min_y) / f64::from(mega_size)), // Pixel height (negative for top-down)
+                            ])
+                            .expect("error setting geo transform");
 
-                            target_ds
-                                .set_geo_transform(&[
-                                    bbox.min_x,                                          // Top-left x
-                                    (bbox.max_x - bbox.min_x) / f64::from(mega_size), // Pixel width
-                                    0.0,        // Rotation (x-axis)
-                                    bbox.max_y, // Top-left y
-                                    0.0,        // Rotation (y-axis)
-                                    -((bbox.max_y - bbox.min_y) / f64::from(mega_size)), // Pixel height (negative for top-down)
-                                ])
-                                .expect("error setting geo transform");
+                        steps.push('W');
 
-                            steps.push('W');
+                        warp::warp(&source_ds, &target_ds, mega_size, &self.transform);
 
-                            warp::warp(&source_ds, &target_ds, mega_size, &transform);
-
-                            get_buffers(&target_ds, mega_size as usize)
-                        } else {
-                            get_buffers(&source_ds, mega_size as usize)
-                        };
+                        let buffers: Vec<_> = target_ds
+                            .rasterbands()
+                            .map(|band| {
+                                band.expect("raster band should be obtained")
+                                    .read_as::<u8>(
+                                        (0, 0),
+                                        (mega_size as usize, mega_size as usize),
+                                        (mega_size as usize, mega_size as usize),
+                                        None,
+                                    )
+                                    .expect("band should be read")
+                            })
+                            .collect();
 
                         self.pool
                             .lock()
@@ -418,13 +425,18 @@ impl Processor {
 
                             let out_offset = (x + y * self.tile_size as usize) * BAND_COUNT;
 
-                            for i in 0..BAND_COUNT {
-                                let b = megatile[in_offset + i];
+                            // TODO alternative - mask
+                            if !(0..BAND_COUNT).all(|i| megatile[in_offset + i] == 255) {
+                                no_data = false;
 
-                                out_buffer[out_offset + i] = b;
+                                for i in 0..BAND_COUNT {
+                                    let b = megatile[in_offset + i];
 
-                                if i == BAND_COUNT - 1 {
-                                    no_data &= b == 0;
+                                    out_buffer[out_offset + i] = b;
+
+                                    // if i == BAND_COUNT - 1 {
+                                    //     no_data &= b == 0; // TODO use proper nodata
+                                    // }
                                 }
                             }
                         }
@@ -440,16 +452,6 @@ impl Processor {
 
                     let alpha_enc = match self.format {
                         Format::JPEG => {
-                            // produces bigger jpegs
-                            // JpegEncoder::new_with_quality(Cursor::new(&mut vect), 100)
-                            //     .write_image(
-                            //         &out_buffer,
-                            //         tile_size as u32,
-                            //         tile_size as u32,
-                            //         image::ExtendedColorType::Rgb8,
-                            //     )
-                            //     .expect("Failed to encode JPEG");
-
                             let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
 
                             let mut alpha = Vec::with_capacity(rgba.len() / 4);
@@ -468,11 +470,13 @@ impl Processor {
 
                             if !is_full {
                                 let mut encoder = zstd::Encoder::new(&mut alpha_enc, 0)
-                                    .expect("error creating zstd encoder");
+                                    .expect("zstd encoder should be created");
 
-                                encoder.write_all(&alpha).expect("error zstd encoding");
+                                encoder
+                                    .write_all(&alpha)
+                                    .expect("data should be zstd encoded");
 
-                                encoder.finish().expect("error finishing zstd encoding");
+                                encoder.finish().expect("zstd encoding should be finished");
                             }
 
                             jpeg_encoder::Encoder::new(&mut rgb_enc, self.jpeg_quality)
@@ -482,7 +486,7 @@ impl Processor {
                                     self.tile_size,
                                     jpeg_encoder::ColorType::Rgb,
                                 )
-                                .expect("JPEG encoded");
+                                .expect("JPEG should be encoded");
 
                             alpha_enc
                         }
@@ -498,9 +502,7 @@ impl Processor {
                                 self.tile_size as u32,
                                 image::ExtendedColorType::Rgba8,
                             )
-                            .expect("PNG encoded");
-
-                            println!("PP {}", rgb_enc.len());
+                            .expect("PNG should be encoded");
 
                             vec![]
                         }
@@ -512,7 +514,7 @@ impl Processor {
 
                     self.limits
                         .lock()
-                        .expect("error locking limits")
+                        .expect("limits should be locked")
                         .entry(tile.zoom)
                         .and_modify(|limits: &mut Limits| {
                             limits.max_x = limits.max_x.max(tile.x);
@@ -529,11 +531,11 @@ impl Processor {
 
                     self.data_tx
                         .send((tile, rgb_enc, alpha_enc))
-                        .expect("error sending data");
+                        .expect("data shouuld be sent");
 
                     self.buffer_cache
                         .lock()
-                        .expect("error locking buffer_cache")
+                        .expect("buffer_cache should be locked")
                         .insert(tile, rgba);
                 } else if self.insert_empty {
                     steps.push('○');
@@ -541,11 +543,11 @@ impl Processor {
                     // insert "nothing" - used for resuming
                     self.data_tx
                         .send((tile, vec![], vec![]))
-                        .expect("error sending data");
+                        .expect("data shouuld be sent");
                 }
             }; // 'out
 
-            let mut status = self.state.lock().expect("error locking state");
+            let mut status = self.state.lock().expect("state should be locked");
 
             todo -= 1;
 

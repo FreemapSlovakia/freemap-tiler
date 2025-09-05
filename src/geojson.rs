@@ -28,10 +28,10 @@ pub fn parse_geojson_polygon(file_path: &Path) -> Result<Polygon<f64>, String> {
         }
         GeoJson::FeatureCollection(collection) => {
             for feature in collection.features {
-                if let Some(geometry) = feature.geometry {
-                    if let Ok(polygon) = Polygon::try_from(geometry.value) {
-                        return Ok(polygon);
-                    }
+                if let Some(geometry) = feature.geometry
+                    && let Ok(polygon) = Polygon::try_from(geometry.value)
+                {
+                    return Ok(polygon);
                 }
             }
             Err("No polygons found in collection".into())

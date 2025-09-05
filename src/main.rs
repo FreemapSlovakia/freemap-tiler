@@ -131,11 +131,9 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let transform = if let Some(ref pipeline) = args.transform_pipeline {
         options.set_coordinate_operation(pipeline, false)?;
 
-        Some(Transform::Pipeline(pipeline.to_string()))
-    } else if source_srs == target_srs {
-        None
+        Transform::Pipeline(pipeline.to_string())
     } else {
-        Some(Transform::Srs(source_srs.to_wkt()?, target_srs.to_wkt()?))
+        Transform::Srs(source_srs.to_wkt()?, target_srs.to_wkt()?)
     };
 
     println!("Computing tile coverage");
@@ -197,12 +195,12 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            if let Some(parent_tile) = tile.parent() {
-                if todo_set.insert(parent_tile) {
-                    todo_dq.push_back(parent_tile);
+            if let Some(parent_tile) = tile.parent()
+                && todo_set.insert(parent_tile)
+            {
+                todo_dq.push_back(parent_tile);
 
-                    pending_set.insert(parent_tile);
-                }
+                pending_set.insert(parent_tile);
             }
         }
     }
