@@ -14,6 +14,7 @@ use clap::Parser;
 use crossbeam_deque::{Steal, Stealer, Worker};
 use gdal::{
     Dataset,
+    raster::ColorInterpretation,
     spatial_ref::{CoordTransform, CoordTransformOptions, SpatialRef},
 };
 use geo::compute_bbox;
@@ -76,12 +77,36 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()
         .map_err(|e| format!("Error reprojecting polygon: {e}"))?;
 
-    let source_ds = Dataset::open(&args.source_file).expect("Error opening source");
+    let source_ds = Dataset::open(&args.source_file).expect("source should be opened");
 
-    let band_count = source_ds.raster_count();
+    let supported = vec![
+        vec![ColorInterpretation::GrayIndex],
+        vec![
+            ColorInterpretation::GrayIndex,
+            ColorInterpretation::AlphaBand,
+        ],
+        vec![
+            ColorInterpretation::RedBand,
+            ColorInterpretation::GreenBand,
+            ColorInterpretation::BlueBand,
+        ],
+        vec![
+            ColorInterpretation::RedBand,
+            ColorInterpretation::GreenBand,
+            ColorInterpretation::BlueBand,
+            ColorInterpretation::AlphaBand,
+        ],
+    ]
+    .iter()
+    .any(|colors| {
+        source_ds.raster_count() == colors.len()
+            && colors.iter().enumerate().all(|(i, color)| {
+                source_ds.rasterband(i + 1).unwrap().color_interpretation() == *color
+            })
+    });
 
-    if band_count != 4 {
-        return Err("Expecting 4 bands".into());
+    if !supported {
+        return Err("Supports only G, GA, RGB, RGBA rasters".into());
     }
 
     // // delete a tile and parents
@@ -282,6 +307,10 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
             args.warp_zoom_offset,
             args.insert_empty,
             args.format,
+            source_ds
+                .rasterbands()
+                .map(|band| band.unwrap().no_data_value().map(|nd| nd as u8))
+                .collect(),
         );
 
         println!("Generating tiles");

@@ -8,7 +8,7 @@ use crate::{
 use crossbeam_deque::Worker;
 use gdal::{Dataset, DriverManager, raster::ColorInterpretation};
 use image::{
-    ImageDecoder, ImageEncoder, RgbaImage,
+    GrayAlphaImage, ImageDecoder, ImageEncoder, RgbaImage,
     codecs::{jpeg::JpegDecoder, png::PngEncoder},
     imageops::FilterType,
 };
@@ -46,9 +46,9 @@ pub struct Processor {
     zoom_offset: u8,
     insert_empty: bool,
     format: Format,
+    no_data: Vec<Option<u8>>,
+    band_count: usize,
 }
-
-const BAND_COUNT: usize = 4;
 
 impl Processor {
     pub fn new(
@@ -67,6 +67,7 @@ impl Processor {
         zoom_offset: u8,
         insert_empty: bool,
         format: Format,
+        no_data: Vec<Option<u8>>,
     ) -> Self {
         let total = pending_set.len();
 
@@ -82,6 +83,8 @@ impl Processor {
                     .expect("error opening continue mbtiles connection"),
             ))
         });
+
+        let band_count = (no_data.len() / 2) * 2;
 
         Self {
             buffer_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -102,6 +105,8 @@ impl Processor {
             zoom_offset,
             insert_empty,
             format,
+            no_data,
+            band_count,
         }
     }
 
@@ -227,7 +232,7 @@ impl Processor {
                     let mut out_buffer =
                         vec![
                             0u8;
-                            self.tile_size as usize * self.tile_size as usize * BAND_COUNT * 4
+                            self.tile_size as usize * self.tile_size as usize * self.band_count * 4
                         ];
 
                     let mut has_data = false;
@@ -262,31 +267,48 @@ impl Processor {
                             for y in 0..self.tile_size as usize {
                                 let offset1 = ((x + so_x)
                                     + (y + so_y) * self.tile_size as usize * 2)
-                                    * BAND_COUNT;
+                                    * self.band_count;
 
-                                let offset2 = (x + y * self.tile_size as usize) * BAND_COUNT;
+                                let offset2 = (x + y * self.tile_size as usize) * self.band_count;
 
-                                out_buffer[offset1..(BAND_COUNT + offset1)]
-                                    .copy_from_slice(&sector[offset2..(BAND_COUNT + offset2)]);
+                                out_buffer[offset1..(self.band_count + offset1)]
+                                    .copy_from_slice(&sector[offset2..(self.band_count + offset2)]);
                             }
                         }
                     }
 
                     if has_data {
-                        let image = RgbaImage::from_vec(
-                            u32::from(self.tile_size) * 2,
-                            u32::from(self.tile_size) * 2,
-                            out_buffer,
-                        )
-                        .expect("Invalid image dimensions");
+                        let img = if self.band_count == 2 {
+                            let image = GrayAlphaImage::from_vec(
+                                u32::from(self.tile_size) * 2,
+                                u32::from(self.tile_size) * 2,
+                                out_buffer,
+                            )
+                            .expect("rgba image should be created");
 
-                        let img = image::imageops::resize(
-                            &image,
-                            u32::from(self.tile_size),
-                            u32::from(self.tile_size),
-                            FilterType::Lanczos3,
-                        )
-                        .into_raw();
+                            image::imageops::resize(
+                                &image,
+                                u32::from(self.tile_size),
+                                u32::from(self.tile_size),
+                                FilterType::Lanczos3,
+                            )
+                            .into_raw()
+                        } else {
+                            let image = RgbaImage::from_vec(
+                                u32::from(self.tile_size) * 2,
+                                u32::from(self.tile_size) * 2,
+                                out_buffer,
+                            )
+                            .expect("rgba image should be created");
+
+                            image::imageops::resize(
+                                &image,
+                                u32::from(self.tile_size),
+                                u32::from(self.tile_size),
+                                FilterType::Lanczos3,
+                            )
+                            .into_raw()
+                        };
 
                         self.stats_tx
                             .send(StatsMsg::Duration(
@@ -318,7 +340,7 @@ impl Processor {
 
                         let bbox = tile
                             .ancestor(self.zoom_offset)
-                            .expect("error getting tile ancestor") // TODO
+                            .expect("shold have tile ancestor")
                             .bounds(mega_size);
 
                         let mut target_ds = DriverManager::get_driver_by_name("MEM")
@@ -327,19 +349,25 @@ impl Processor {
                                 "",
                                 (self.tile_size as usize) << self.zoom_offset,
                                 (self.tile_size as usize) << self.zoom_offset,
-                                BAND_COUNT,
+                                self.band_count,
                             )
-                            .expect("Failed to create target dataset");
+                            .expect("target dataset should be created");
 
-                        for (i, color) in vec![
-                            ColorInterpretation::RedBand,
-                            ColorInterpretation::GreenBand,
-                            ColorInterpretation::BlueBand,
-                            ColorInterpretation::AlphaBand,
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
+                        let colors = if self.band_count == 2 {
+                            vec![
+                                ColorInterpretation::GrayIndex,
+                                ColorInterpretation::AlphaBand,
+                            ]
+                        } else {
+                            vec![
+                                ColorInterpretation::RedBand,
+                                ColorInterpretation::GreenBand,
+                                ColorInterpretation::BlueBand,
+                                ColorInterpretation::AlphaBand,
+                            ]
+                        };
+
+                        for (i, color) in colors.into_iter().enumerate() {
                             target_ds
                                 .rasterband(i + 1)
                                 .unwrap()
@@ -381,12 +409,15 @@ impl Processor {
                             .expect("error locking dataset pool")
                             .push(source_ds);
 
-                        let mut megatile1 =
-                            vec![0u8; ((mega_size as usize) * (mega_size as usize)) * BAND_COUNT];
+                        let mut megatile1 = vec![
+                            0u8;
+                            ((mega_size as usize) * (mega_size as usize))
+                                * self.band_count
+                        ];
 
                         for x in 0..mega_size as usize {
                             for y in 0..mega_size as usize {
-                                let offset = (x + y * mega_size as usize) * BAND_COUNT;
+                                let offset = (x + y * mega_size as usize) * self.band_count;
 
                                 for (i, buffer) in buffers.iter().enumerate() {
                                     let b = buffer[(y, x)];
@@ -411,7 +442,10 @@ impl Processor {
                     let (sx, sy) = tile.sector_in_ancestor(self.zoom_offset);
 
                     let mut out_buffer =
-                        vec![0u8; self.tile_size as usize * self.tile_size as usize * BAND_COUNT];
+                        vec![
+                            0u8;
+                            self.tile_size as usize * self.tile_size as usize * self.band_count
+                        ];
 
                     let mut no_data = true;
 
@@ -421,20 +455,20 @@ impl Processor {
                                 + (sx as usize) * (self.tile_size as usize)
                                 + (y + (sy as usize) * (self.tile_size as usize))
                                     * (mega_size as usize))
-                                * BAND_COUNT;
+                                * self.band_count;
 
-                            let out_offset = (x + y * self.tile_size as usize) * BAND_COUNT;
+                            let out_offset = (x + y * self.tile_size as usize) * self.band_count;
 
                             // TODO alternative - mask
-                            if !(0..BAND_COUNT).all(|i| megatile[in_offset + i] == 255) {
+                            if !(0..self.band_count).all(|i| megatile[in_offset + i] == 255) {
                                 no_data = false;
 
-                                for i in 0..BAND_COUNT {
+                                for i in 0..self.band_count {
                                     let b = megatile[in_offset + i];
 
                                     out_buffer[out_offset + i] = b;
 
-                                    // if i == BAND_COUNT - 1 {
+                                    // if i == self.band_count - 1 {
                                     //     no_data &= b == 0; // TODO use proper nodata
                                     // }
                                 }
@@ -448,27 +482,29 @@ impl Processor {
                 if let Some(rgba) = rgba {
                     steps.push('●');
 
-                    let mut rgb_enc = Vec::new();
+                    let mut encoded = Vec::new();
 
                     let alpha_enc = match self.format {
                         Format::JPEG => {
-                            let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+                            let mut rgb = Vec::with_capacity(
+                                rgba.len() / self.band_count * (self.band_count - 1),
+                            );
 
-                            let mut alpha = Vec::with_capacity(rgba.len() / 4);
+                            let mut alpha = Vec::with_capacity(rgba.len() / self.band_count);
 
-                            let mut is_full = true;
+                            let mut fully_opaque = true;
 
-                            for chunk in rgba.chunks_exact(4) {
-                                rgb.extend_from_slice(&chunk[0..3]);
+                            for chunk in rgba.chunks_exact(self.band_count) {
+                                rgb.extend_from_slice(&chunk[0..self.band_count - 1]);
 
-                                alpha.push(chunk[3]);
+                                alpha.push(chunk[self.band_count - 1]);
 
-                                is_full = is_full && chunk[3] == 255;
+                                fully_opaque = fully_opaque && chunk[self.band_count - 1] == 255;
                             }
 
                             let mut alpha_enc = Vec::new();
 
-                            if !is_full {
+                            if !fully_opaque {
                                 let mut encoder = zstd::Encoder::new(&mut alpha_enc, 0)
                                     .expect("zstd encoder should be created");
 
@@ -479,12 +515,16 @@ impl Processor {
                                 encoder.finish().expect("zstd encoding should be finished");
                             }
 
-                            jpeg_encoder::Encoder::new(&mut rgb_enc, self.jpeg_quality)
+                            jpeg_encoder::Encoder::new(&mut encoded, self.jpeg_quality)
                                 .encode(
                                     &rgb,
                                     self.tile_size,
                                     self.tile_size,
-                                    jpeg_encoder::ColorType::Rgb,
+                                    if self.band_count == 2 {
+                                        jpeg_encoder::ColorType::Luma
+                                    } else {
+                                        jpeg_encoder::ColorType::Rgb
+                                    },
                                 )
                                 .expect("JPEG should be encoded");
 
@@ -492,7 +532,7 @@ impl Processor {
                         }
                         Format::PNG => {
                             PngEncoder::new_with_quality(
-                                &mut rgb_enc,
+                                &mut encoded,
                                 image::codecs::png::CompressionType::Best,
                                 image::codecs::png::FilterType::Adaptive,
                             )
@@ -500,7 +540,11 @@ impl Processor {
                                 &rgba,
                                 self.tile_size as u32,
                                 self.tile_size as u32,
-                                image::ExtendedColorType::Rgba8,
+                                if self.band_count == 2 {
+                                    image::ExtendedColorType::La8
+                                } else {
+                                    image::ExtendedColorType::Rgba8
+                                },
                             )
                             .expect("PNG should be encoded");
 
@@ -530,7 +574,7 @@ impl Processor {
                         });
 
                     self.data_tx
-                        .send((tile, rgb_enc, alpha_enc))
+                        .send((tile, encoded, alpha_enc))
                         .expect("data shouuld be sent");
 
                     self.buffer_cache
