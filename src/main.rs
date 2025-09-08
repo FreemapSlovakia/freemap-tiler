@@ -276,8 +276,6 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (stats_tx, stats_collector_thread) = time_track::new(args.debug);
 
-    source_ds;
-
     let (insert_thread, data_tx) = tile_inserter::new(
         target_file,
         if args.continue_file.is_none() || args.continue_file.as_deref() != Some(target_file) {
