@@ -18,13 +18,14 @@ pub fn new(
     num_threads: u16,
     stats_tx: Sender<StatsMsg>,
     format: Format,
+    bounds: [f64; 4],
 ) -> rusqlite::Result<(JoinHandle<()>, SyncSender<(Tile, Vec<u8>, Vec<u8>)>)> {
     let (data_tx, data_rx) = sync_channel::<(Tile, Vec<u8>, Vec<u8>)>(num_threads as usize * 16);
 
     let conn = Connection::open(target_file)?;
 
     if let Some(max_zoom) = max_zoom {
-        create_schema(&conn, max_zoom, format)?;
+        create_schema(&conn, max_zoom, format, bounds)?;
     }
 
     conn.pragma_update(None, "synchronous", "OFF")?;

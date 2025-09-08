@@ -46,7 +46,6 @@ pub struct Processor {
     zoom_offset: u8,
     insert_empty: bool,
     format: Format,
-    no_data: Vec<Option<u8>>,
     band_count: usize,
 }
 
@@ -84,7 +83,7 @@ impl Processor {
             ))
         });
 
-        let band_count = (no_data.len() / 2) * 2;
+        let band_count = ((no_data.len() + 1) / 2) * 2;
 
         Self {
             buffer_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -105,7 +104,6 @@ impl Processor {
             zoom_offset,
             insert_empty,
             format,
-            no_data,
             band_count,
         }
     }
@@ -404,6 +402,11 @@ impl Processor {
                             })
                             .collect();
 
+                        let no_data: Vec<_> = target_ds
+                            .rasterbands()
+                            .map(|band| band.unwrap().no_data_value().map(|nd| nd as u8))
+                            .collect();
+
                         self.pool
                             .lock()
                             .expect("error locking dataset pool")
@@ -422,6 +425,14 @@ impl Processor {
                                 for (i, buffer) in buffers.iter().enumerate() {
                                     let b = buffer[(y, x)];
 
+                                    if no_data[i].map_or(false, |v| b == v) {
+                                        for j in 0..buffers.len() {
+                                            megatile1[offset + j] = 0;
+                                        }
+
+                                        break;
+                                    }
+
                                     megatile1[offset + i] = b;
                                 }
                             }
@@ -436,7 +447,7 @@ impl Processor {
 
                         megatile = Some(megatile1);
 
-                        megatile.as_ref().expect("megatile is missing")
+                        megatile.as_ref().unwrap()
                     };
 
                     let (sx, sy) = tile.sector_in_ancestor(self.zoom_offset);
@@ -447,7 +458,7 @@ impl Processor {
                             self.tile_size as usize * self.tile_size as usize * self.band_count
                         ];
 
-                    let mut no_data = true;
+                    let mut is_empty = true;
 
                     for x in 0..self.tile_size as usize {
                         for y in 0..self.tile_size as usize {
@@ -460,8 +471,8 @@ impl Processor {
                             let out_offset = (x + y * self.tile_size as usize) * self.band_count;
 
                             // TODO alternative - mask
-                            if !(0..self.band_count).all(|i| megatile[in_offset + i] == 255) {
-                                no_data = false;
+                            if megatile[in_offset + self.band_count - 1] > 0 {
+                                is_empty = false;
 
                                 for i in 0..self.band_count {
                                     let b = megatile[in_offset + i];
@@ -476,7 +487,7 @@ impl Processor {
                         }
                     }
 
-                    if no_data { None } else { Some(out_buffer) }
+                    if is_empty { None } else { Some(out_buffer) }
                 }; // tile.zoom < max_zoom
 
                 if let Some(rgba) = rgba {
@@ -486,9 +497,8 @@ impl Processor {
 
                     let alpha_enc = match self.format {
                         Format::JPEG => {
-                            let mut rgb = Vec::with_capacity(
-                                rgba.len() / self.band_count * (self.band_count - 1),
-                            );
+                            let mut rgb =
+                                Vec::with_capacity(rgba.len() - rgba.len() / self.band_count);
 
                             let mut alpha = Vec::with_capacity(rgba.len() / self.band_count);
 

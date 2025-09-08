@@ -163,21 +163,19 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Computing tile coverage");
 
-    let trans = CoordTransform::new_with_options(&source_srs, &target_srs, &options)
+    let bounds = CoordTransform::new_with_options(&source_srs, &target_srs, &options)
         .map_err(|e| format!("Failed to create coordinate transform: {e}"))?
         .transform_bounds(&[bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y], 21)
         .map_err(|e| format!("Error transforming bounds: {e}"))?;
-
-    println!("TRANS {:?}", trans);
 
     let bounding_polygon = bounding_polygon.as_ref();
 
     let mut tiles: Vec<_> = bbox_covered_tiles(
         &BBox {
-            min_x: trans[0],
-            max_x: trans[2],
-            min_y: trans[1],
-            max_y: trans[3],
+            min_x: bounds[0],
+            max_x: bounds[2],
+            min_y: bounds[1],
+            max_y: bounds[3],
         },
         args.max_zoom,
     )
@@ -278,6 +276,8 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (stats_tx, stats_collector_thread) = time_track::new(args.debug);
 
+    source_ds;
+
     let (insert_thread, data_tx) = tile_inserter::new(
         target_file,
         if args.continue_file.is_none() || args.continue_file.as_deref() != Some(target_file) {
@@ -288,6 +288,7 @@ fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         num_threads,
         stats_tx.clone(),
         args.format,
+        bounds,
     )?;
 
     {

@@ -2,7 +2,12 @@ use rusqlite::{Connection, Error};
 
 use crate::args::Format;
 
-pub fn create_schema(conn: &Connection, max_zoom: u8, format: Format) -> Result<(), Error> {
+pub fn create_schema(
+    conn: &Connection,
+    max_zoom: u8,
+    format: Format,
+    bounds: [f64; 4],
+) -> Result<(), Error> {
     conn.execute(
         "CREATE TABLE metadata (
           name TEXT NOT NULL,
@@ -55,6 +60,11 @@ pub fn create_schema(conn: &Connection, max_zoom: u8, format: Format) -> Result<
     conn.execute(
         "INSERT INTO metadata (name, value) VALUES ('maxzoom', ?1)",
         [max_zoom],
+    )?;
+
+    conn.execute(
+        "INSERT INTO metadata (name, value) VALUES ('bounds', ?1)",
+        [bounds.map(|c| format!("{}", c)).join(",")],
     )?;
 
     Ok(())
