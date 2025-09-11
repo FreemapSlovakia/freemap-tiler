@@ -3,8 +3,8 @@
 Tool to create MBTiles from raster geodata with a full pyramid overview from to 0.
 Uses Z-order curve to efficiently create lower-zoom tiles storing minimal tiles in RAM.
 
-Source can be any raster GDAL source containing 4 bands - Red, Green, Blue, Alpha.
-The tool takes care of reprojection, slicing to tiles including all lowzoom (overview) tiles and storing it to MBTile format with cusom extension.
+Source can be any raster GDAL source containing one of RGB, RGBA, Gray, Gray+Alpha.
+The tool takes care of reprojection, slicing to tiles including all lowzoom (overview) tiles and storing it to MBTile format optional cusom extension to store alpha if JPEG is used.
 
 ## Extensions of MBTile format
 
@@ -35,6 +35,8 @@ Options:
           Input raster geofile
       --target-file <TARGET_FILE>
           Output *.mbtiles file
+      --continue-file <CONTINUE_FILE>
+          Continue *.mbtiles file, use same as target-file to continue to the same file
       --max-zoom <MAX_ZOOM>
           Max zoom level
       --source-srs <SOURCE_SRS>
@@ -42,19 +44,21 @@ Options:
       --transform-pipeline <TRANSFORM_PIPELINE>
           Projection transformation pipeline
       --bounding-polygon <BOUNDING_POLYGON>
-          Bounding polygon in `GeoJSON`` file
+          Bounding polygon in `GeoJSON` file
       --tile-size <TILE_SIZE>
           Tile size [default: 256]
       --num-threads <NUM_THREADS>
           Number of threads for parallel processing [default: available parallelism]
+      --format <FORMAT>
+          [default: jpeg] [possible values: jpeg, png]
       --jpeg-quality <JPEG_QUALITY>
           JPEG quality [default: 85]
       --warp-zoom-offset <WARP_ZOOM_OFFSET>
           Advanced: zoom offset of a parent tile to reproject at once. Modify to fine-tune the performance [default: 3]
-      --resume
-          Resume
       --debug
           Debug
+      --insert-empty [<INSERT_EMPTY>]
+          Insert empty [default: true] [possible values: true, false]
   -h, --help
           Print help
   -V, --version
