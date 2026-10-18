@@ -115,9 +115,8 @@ freemap-tiler \
 1. create a vector mask
    ```sh
    ogr2ogr -f GPKG combined.gpkg sk-area.gpkg -nln dissolved
-   cp combined.gpkg vychod-mask.gpkg
-   ogr2ogr -f GPKG -update -append vychod-mask.gpkg vychod-tiles.gpkg -nln tiles
-   ogr2ogr -f GPKG intersection.gpkg vychod-mask.gpkg \
+   ogr2ogr -f GPKG -update -append combined.gpkg vychod-tiles.gpkg -nln tiles
+   ogr2ogr -f GPKG vychod-mask.gpkg combined.gpkg \
      -dialect sqlite \
      -sql "
        SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
@@ -170,68 +169,67 @@ freemap-tiler \
 
 ### Czech republic
 
-TODO
+ČÚZK publishes the orthophoto as JPEG + JGW per SM5 map sheet (S-JTSK, 0.125 m) in its [ATOM feed](https://atom.cuzk.gov.cz/ORTOFOTO/ORTOFOTO.xml). Half of the country is flown each year: west (_západ_) in odd years, east (_východ_) in even ones. The feed holds only the latest year of each sheet. Example for _západ_ 2025:
 
-```sh
-gdaltindex vychod-tileindex.gpkg -lyr_name index new/*.jpg
-
-ogr2ogr \
--f GPKG \
-vychod-tileindex-dissolved.gpkg \
-vychod-tileindex.gpkg \
--nln dissolved \
--nlt POLYGON \
--dialect sqlite \
--sql "SELECT ST_Union(geom) AS geometry FROM 'index'" \
--a_srs EPSG:5514
-
-(ogr2ogr
--f GPKG
-result.gpkg
-admin.gpkg
--nln tiles
--nlt POLYGON
--dialect sqlite
--sql "SELECT ST_Buffer(geom, 99.5, 16) AS geometry FROM administrative_units"
--a_srs EPSG:5514)
-
-ogr2ogr -f GPKG -update -append result.gpkg vychod-tileindex-dissolved.gpkg -nln dissolved
-
-(ogr2ogr -f GPKG intersection.gpkg result.gpkg
--dialect sqlite
--sql "
- SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
- FROM tiles a, dissolved b
- WHERE ST_Intersects(a.geometry, b.geometry)
-"
--nln intersection
--nlt POLYGON
--a_srs EPSG:5514)
-
-gdalbuildvrt vychod.vrt new/*.jpg
-
-gdal_rasterize \
--burn 0 \
--at -i \
--init 255 \
--tap \
-$(gdalinfo -json vychod.vrt | jq -r '"-te \(.cornerCoordinates.upperLeft[0]) \(.cornerCoordinates.lowerRight[1]) \(.cornerCoordinates.lowerRight[0]) \(.cornerCoordinates.upperLeft[1]) -tr \(.geoTransform[1]) \(-.geoTransform[5])"') \
--ot Byte \
--of GTiff \
--co TILED=YES \
--co COMPRESS=ZSTD \
--co BIGTIFF=YES \
-intersection.gpkg \
-vychod-alpha-mask.tif
-```
-
-To get transformation pipeline: `projinfo -s EPSG:5514 -t EPSG:3857 --spatial-test intersects -o proj`
-
-```sh
-
-reset; nice cargo run --release -- --source-file /home/martin/14TB/CZ-ORTOFOTO/vychod/vychod.vrt --target-file /home/martin/OSM/vychod-v6.mbtiles --max-zoom 20 --source-srs EPSG:5514 --jpeg-quality 85 --bounding-polygon /home/martin/14TB/CZ-ORTOFOTO/vychod/bounds.geojson --transform-pipeline "+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=570.8 +y=85.7 +z=462.8 +rx=4.998 +ry=1.587 +rz=5.261 +s=3.56 +convention=position_vector +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84" --resume --debug
-
-zapad:
-reset; nice cargo run --release -- --source-file /home/martin/14TB/CZ-ORTOFOTO/zapad/data/all.vrt --target-file /home/martin/OSM/cz-zapad.mbtiles --max-zoom 20 --source-srs 'EPSG:5514' --jpeg-quality 85 --warp-zoom-offset 4 --bounding-polygon /home/martin/14TB/CZ-ORTOFOTO/zapad/bounds.geojson --transform-pipeline '+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=570.8 +y=85.7 +z=462.8 +rx=4.998 +ry=1.587 +rz=5.261 +s=3.56 +convention=position_vector +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84' --target-file2 /home/martin/OSM/cz-zapad.mbtiles
-
-```
+1. download the sheets of the year; some ZIPs keep the files in a subfolder, hence `-j` and the wildcards
+   ```sh
+   curl -sSf https://atom.cuzk.gov.cz/ORTOFOTO/ORTOFOTO.xml | grep -oE 'WRTO24\.2025\.[A-Z0-9]+' | sort -u > sheets.txt
+   mkdir -p raw
+   xargs -P 6 -I{} sh -c 'curl -sSf --retry 3 -o {}.zip https://openzu.cuzk.gov.cz/opendata/ORTOFOTO/{}.zip && unzip -qjo {}.zip "*{}.jpg" "*{}.jgw" -d raw && rm {}.zip' < sheets.txt
+   ```
+1. build VRT
+   ```sh
+   ls raw/*.jpg > jpgs.txt
+   gdalbuildvrt -a_srs EPSG:5514 -input_file_list jpgs.txt zapad.vrt
+   ```
+1. create a vector mask: the sheets' footprint intersected with the state boundary buffered by 99.5 m (`administrative_units` from ČÚZK's administrative boundaries, in `admin.gpkg`)
+   ```sh
+   gdaltindex -lyr_name index index.gpkg raw/*.jpg
+   ogr2ogr -f GPKG combined.gpkg index.gpkg -nln dissolved -nlt POLYGON -a_srs EPSG:5514 \
+     -dialect sqlite -sql "SELECT ST_Union(geom) AS geometry FROM 'index'"
+   ogr2ogr -f GPKG -update -append combined.gpkg admin.gpkg -nln tiles -nlt POLYGON -a_srs EPSG:5514 \
+     -dialect sqlite -sql "SELECT ST_Buffer(geom, 99.5, 16) AS geometry FROM administrative_units"
+   ogr2ogr -f GPKG zapad-mask.gpkg combined.gpkg -nln mask -nlt POLYGON -a_srs EPSG:5514 \
+     -dialect sqlite -sql "
+       SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
+       FROM tiles a, dissolved b
+       WHERE ST_Intersects(a.geometry, b.geometry)
+     "
+   ```
+   The mask of the previous run of the same half can be reused when the sheet set is the same; then the seam with the other half stays where it was.
+1. create the bounding polygon
+   ```sh
+   ogr2ogr -f GeoJSON -t_srs EPSG:4326 -simplify 10 bounds.geojson zapad-mask.gpkg
+   ```
+1. rasterize the mask
+   ```sh
+   gdal_rasterize \
+     -burn 0 \
+     -at -i \
+     -init 255 \
+     $(gdalinfo -json zapad.vrt | jq -r '"-te \(.cornerCoordinates.upperLeft[0]) \(.cornerCoordinates.lowerRight[1]) \(.cornerCoordinates.lowerRight[0]) \(.cornerCoordinates.upperLeft[1]) -tr \(.geoTransform[1]) \(-.geoTransform[5])"') \
+     -ot Byte \
+     -of GTiff \
+     -co TILED=YES \
+     -co COMPRESS=ZSTD \
+     -co BIGTIFF=YES \
+     zapad-mask.gpkg zapad-alpha-mask.tif
+   ```
+1. add the mask to `zapad.vrt` as the alpha band and save it as `zapad-with-mask.vrt`, the same way as for Slovakia
+1. create MBTiles; the transformation is the 7-parameter Helmert of EPSG "S-JTSK to WGS 84 (1)" (no grid); list the candidates with `projinfo -s EPSG:5514 -t EPSG:3857 --spatial-test intersects -o proj`
+   ```sh
+   nice freemap-tiler \
+     --source-file zapad-with-mask.vrt \
+     --target-file cz-zapad-2025.mbtiles \
+     --max-zoom 20 \
+     --source-srs EPSG:5514 \
+     --jpeg-quality 85 \
+     --warp-zoom-offset 4 \
+     --bounding-polygon bounds.geojson \
+     --transform-pipeline '+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +step +proj=push +v_3 +step +proj=cart +ellps=bessel +step +proj=helmert +x=570.8 +y=85.7 +z=462.8 +rx=4.998 +ry=1.587 +rz=5.261 +s=3.56 +convention=position_vector +step +inv +proj=cart +ellps=WGS84 +step +proj=pop +v_3 +step +proj=webmerc +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84'
+   ```
+   Add `--continue-file cz-zapad-2025.mbtiles` to resume an interrupted run.
+1. name the tileset and leave WAL mode, so readers need no `-shm`; quote the values with single quotes, as `"name"` is the column, not the string
+   ```sh
+   sqlite3 cz-zapad-2025.mbtiles "UPDATE metadata SET value = 'cz-ortofoto-zapad-2025' WHERE name = 'name'; PRAGMA journal_mode = DELETE"
+   ```
