@@ -169,7 +169,11 @@ freemap-tiler \
 
 ### Czech republic
 
-ČÚZK publishes the orthophoto as JPEG + JGW per SM5 map sheet (S-JTSK, 0.125 m) in its [ATOM feed](https://atom.cuzk.gov.cz/ORTOFOTO/ORTOFOTO.xml). Half of the country is flown each year: west (_západ_) in odd years, east (_východ_) in even ones. The feed holds only the latest year of each sheet. Example for _západ_ 2025:
+ČÚZK publishes the orthophoto as JPEG + JGW per SM5 map sheet (S-JTSK, 0.125 m) in its [ATOM feed](https://atom.cuzk.gov.cz/ORTOFOTO/ORTOFOTO.xml). Half of the country is flown each year: west (_západ_) in odd years, east (_východ_) in even ones. The feed holds only the latest year of each sheet.
+
+[`scripts/cz/download.sh <year>`](scripts/cz/download.sh) does the download and [`scripts/cz/build.sh <name>`](scripts/cz/build.sh) everything from the VRT to the checksum; both run in the working directory and can be re-run. The mask and the bounding polygon are made by hand first, as `mask.gpkg` and `bounds.geojson`.
+
+The steps, for _západ_ 2025:
 
 1. download the sheets of the year; some ZIPs keep the files in a subfolder, hence `-j` and the wildcards
    ```sh
